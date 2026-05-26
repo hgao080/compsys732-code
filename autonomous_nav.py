@@ -58,6 +58,7 @@ SPIN_TOTAL    = 2 * math.pi
 TIME_LIMIT    = 480.0       # 8 min
 
 # ── States ────────────────────────────────────────────────────────────────────
+PLANNING    = 'PLANNING'    # waiting after initial plan so user can see path
 NAVIGATING  = 'NAVIGATING'
 AVOIDING    = 'AVOIDING'
 SPINNING    = 'SPINNING'
@@ -65,6 +66,8 @@ CENTRE_CUBE = 'CENTRE_CUBE'
 CAPTURE     = 'CAPTURE'
 RETURNING   = 'RETURNING'
 DONE        = 'DONE'
+
+PLAN_WAIT_TICKS = 30   # 3 s at 10 Hz — pause so Rviz path is visible before moving
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,6 +203,11 @@ class OccupancyMap:
                 nb = (cc+dc, cr+dr)
                 if not self.is_free(*nb):
                     continue
+                # Prevent corner cutting: diagonal move blocked if either
+                # adjacent cardinal cell is occupied
+                if dc != 0 and dr != 0:
+                    if not self.is_free(cc+dc, cr) or not self.is_free(cc, cr+dr):
+                        continue
                 ng = g[cur] + cost
                 if ng < g.get(nb, float('inf')):
                     g[nb] = ng
@@ -207,17 +215,14 @@ class OccupancyMap:
                     heapq.heappush(heap, (ng + h(*nb), nb))
         return []
 
-    def _simplify(self, pts, tol=0.08):
-        """Remove collinear intermediate waypoints."""
-        if len(pts) <= 2:
+    def _simplify(self, pts, min_dist=0.30):
+        """Keep waypoints at least min_dist apart; always keep last point."""
+        if len(pts) <= 1:
             return pts
         out = [pts[0]]
-        for i in range(1, len(pts) - 1):
-            x0, y0 = out[-1]
-            x1, y1 = pts[i]
-            x2, y2 = pts[i+1]
-            if abs((x1-x0)*(y2-y0) - (x2-x0)*(y1-y0)) > tol:
-                out.append(pts[i])
+        for p in pts[1:-1]:
+            if math.hypot(p[0]-out[-1][0], p[1]-out[-1][1]) >= min_dist:
+                out.append(p)
         out.append(pts[-1])
         return out
 
@@ -292,7 +297,8 @@ class AutonomousNav(Node):
         self.cube_world_pos  = None
 
         # Mission
-        self.state          = NAVIGATING
+        self.state          = PLANNING
+        self.plan_ticks     = 0
         self.start_time     = time.time()
         self.mission_logged = False
 
@@ -377,7 +383,7 @@ class AutonomousNav(Node):
     # ── Control Loop ──────────────────────────────────────────────────────────
 
     def control_loop(self):
-        if (self.state not in (RETURNING, DONE)
+        if (self.state not in (PLANNING, RETURNING, DONE)
                 and time.time() - self.start_time > TIME_LIMIT):
             self.get_logger().warn('Time limit — returning to origin')
             self._replan((0.0, 0.0), DONE)
@@ -386,6 +392,7 @@ class AutonomousNav(Node):
 
         self._publish_robot_pose()
         {
+            PLANNING:    self.do_planning,
             NAVIGATING:  self.do_navigating,
             AVOIDING:    self.do_avoiding,
             SPINNING:    self.do_spinning,
@@ -396,6 +403,19 @@ class AutonomousNav(Node):
         }[self.state]()
 
     # ── State Behaviours ──────────────────────────────────────────────────────
+
+    def do_planning(self):
+        """Hold still for PLAN_WAIT_TICKS so the path is visible in Rviz before moving."""
+        self.stop()
+        self.plan_ticks += 1
+        if self.plan_ticks == 1:
+            self.get_logger().info(
+                f'Path planned ({len(self.waypoints)} waypoints). '
+                f'Starting in {PLAN_WAIT_TICKS/10:.0f}s — check Rviz now.')
+        if self.plan_ticks >= PLAN_WAIT_TICKS:
+            self.state = NAVIGATING
+            self.start_time = time.time()  # reset timer — don't count planning wait
+            self.get_logger().info('Starting navigation')
 
     def do_navigating(self):
         self._follow_waypoints()
