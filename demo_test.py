@@ -17,8 +17,8 @@ FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
 # ── Wall Follow Config ────────────────────────────────────────────────────────
 WALL_LOST_THRESHOLD    = 0.3  # metres — right wall distance to declare wall lost
-WALL_LOST_SPEED        = 0.04  # m/s — forward speed when reacquiring right wall
-WALL_LOST_TURN         = 0.6  # rad/s — turn speed when reacquiring right wall
+WALL_LOST_SPEED        = 0.12  # m/s — forward speed when reacquiring right wall
+WALL_LOST_TURN         = 0.7  # rad/s — turn speed when reacquiring right wall
 WALL_TARGET_DIST       = 0.3  # metres — desired distance to right wall
 WALL_KP                = 1.2   # proportional gain for right-wall distance control
 
@@ -111,8 +111,9 @@ class SearchAndNavigate(Node):
         self.red_pixels       = 0
 
         # Sweep state
-        self.sweep_flag  = False
-        self.sweep_ticks = 0
+        self.sweep_flag            = False
+        self.sweep_ticks           = 0
+        self.sweep_pixel_threshold = MIN_PIXELS_SWEEP_FLAG
 
         # State machine
         self.state = FIND_WALL
@@ -194,15 +195,15 @@ class SearchAndNavigate(Node):
         cv2.waitKey(1)
 
         # Arm sweep if cube glimpsed but not yet centrable
-        if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_SWEEP_FLAG:
+        if self.state == WALL_FOLLOW and pixels >= self.sweep_pixel_threshold:
             self.sweep_flag = True
 
         # Trigger centering when cube first detected during wall search
-        if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_CENTRE:
-            self.state = CENTRE_ON_CUBE
-            self.centre_ticks = 0
-            self.get_logger().info(
-                f'Red cube detected ({pixels} px)! Switching → CENTRE_ON_CUBE')
+        # if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_CENTRE:
+        #     self.state = CENTRE_ON_CUBE
+        #     self.centre_ticks = 0
+        #     self.get_logger().info(
+        #         f'Red cube detected ({pixels} px)! Switching → CENTRE_ON_CUBE')
 
         # Only revert to wall follow if cube is gone for 10 consecutive frames (~1 s)
         if self.state == CENTRE_ON_CUBE:
@@ -322,10 +323,13 @@ class SearchAndNavigate(Node):
 
         self.sweep_ticks += 1
         if self.sweep_ticks >= SWEEP_TOTAL_TICKS:
+            self.sweep_pixel_threshold += 500
             self.sweep_flag  = False
             self.sweep_ticks = 0
             self.state = WALL_FOLLOW
-            self.get_logger().info('Sweep complete, no cube — resuming WALL_FOLLOW')
+            self.get_logger().info(
+                f'Sweep complete, no cube — resuming WALL_FOLLOW '
+                f'(sweep threshold → {self.sweep_pixel_threshold} px)')
             return
 
         msg = Twist()
