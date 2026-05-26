@@ -17,9 +17,10 @@ import rclpy, math, cv2, os, sys, time, heapq
 import numpy as np
 import yaml
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from geometry_msgs.msg import Twist, PoseStamped
 from sensor_msgs.msg import LaserScan, CompressedImage
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from cv_bridge import CvBridge
 
 # ── Robot Config ──────────────────────────────────────────────────────────────
@@ -238,7 +239,15 @@ class AutonomousNav(Node):
             f'Map {self.omap.width}x{self.omap.height} '
             f'res={self.omap.resolution:.3f} m/px')
 
-        self.cmd_pub = self.create_publisher(Twist, f'{NAMESPACE}/cmd_vel', 10)
+        self.cmd_pub  = self.create_publisher(Twist, f'{NAMESPACE}/cmd_vel', 10)
+        # Latched QoS so Rviz gets the map even if it connects after publish
+        _latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE)
+        self.map_pub  = self.create_publisher(OccupancyGrid, '/map', _latched)
+        self.path_pub = self.create_publisher(Path, '/planned_path', 10)
+
         self.create_subscription(LaserScan, f'{NAMESPACE}/scan', self.scan_cb, 10)
         self.create_subscription(
             CompressedImage,
@@ -288,6 +297,7 @@ class AutonomousNav(Node):
 
         # Initial A* plan to target
         self._replan((target_x, target_y), SPINNING)
+        self._publish_map()
 
         self.timer = self.create_timer(0.1, self.control_loop)
         self.get_logger().info(
@@ -542,6 +552,7 @@ class AutonomousNav(Node):
         self.waypoints = pts
         self.get_logger().info(
             f'Planned {len(self.waypoints)} waypoints → {target}')
+        self._publish_path()
 
     def _mark_front_obstacle(self):
         """Mark cells in front of the robot as dynamic obstacles, then rebuild map."""
@@ -555,6 +566,48 @@ class AutonomousNav(Node):
                 pts.append((ox + offset * math.cos(perp),
                              oy + offset * math.sin(perp)))
         self.omap.mark_obstacles(pts)
+        self._publish_map()
+
+    def _publish_map(self):
+        """Publish the inflated occupancy grid (static + dynamic obstacles)."""
+        og = OccupancyGrid()
+        og.header.frame_id = 'odom'
+        og.header.stamp    = self.get_clock().now().to_msg()
+        og.info.resolution = self.omap.resolution
+        og.info.width      = self.omap.width
+        og.info.height     = self.omap.height
+        og.info.origin.position.x  = self.omap.origin_x
+        og.info.origin.position.y  = self.omap.origin_y
+        og.info.origin.orientation.w = 1.0
+        # OccupancyGrid row 0 = y=origin_y (bottom); PGM row 0 = top → flip rows
+        data = []
+        for og_row in range(self.omap.height):
+            pgm_row = self.omap.height - 1 - og_row
+            for col in range(self.omap.width):
+                if self.omap._static[pgm_row, col]:
+                    data.append(100)
+                elif self.omap._dynamic[pgm_row, col]:
+                    data.append(75)   # dynamic obstacle (Phase-2 cylinder)
+                elif self.omap._inflated[pgm_row, col]:
+                    data.append(50)   # inflation zone shown as gray
+                else:
+                    data.append(0)
+        og.data = data
+        self.map_pub.publish(og)
+
+    def _publish_path(self):
+        """Publish current waypoint list as a Path for Rviz."""
+        msg = Path()
+        msg.header.frame_id = 'odom'
+        msg.header.stamp    = self.get_clock().now().to_msg()
+        for wx, wy in self.waypoints:
+            ps = PoseStamped()
+            ps.header = msg.header
+            ps.pose.position.x  = wx
+            ps.pose.position.y  = wy
+            ps.pose.orientation.w = 1.0
+            msg.poses.append(ps)
+        self.path_pub.publish(msg)
 
     def _reset_spin(self):
         self.spin_last_yaw    = None
