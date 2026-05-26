@@ -18,13 +18,15 @@ import numpy as np
 import yaml
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan, CompressedImage
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from cv_bridge import CvBridge
 
 # ── Robot Config ──────────────────────────────────────────────────────────────
 NAMESPACE     = 'T24'
+# AMCL pose topic — check with: ros2 topic list | grep amcl
+AMCL_TOPIC    = f'/{NAMESPACE}/amcl_pose'
 FORWARD_SPEED = 0.15   # m/s
 TURN_SPEED    = 0.5    # rad/s
 AVOID_DIST    = 0.40   # m — front obstacle threshold
@@ -250,9 +252,11 @@ class AutonomousNav(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE)
-        self.map_pub        = self.create_publisher(OccupancyGrid, '/map', _latched)
-        self.path_pub       = self.create_publisher(Path, '/planned_path', 10)
-        self.robot_pose_pub = self.create_publisher(PoseStamped, '/robot_pose', 10)
+        self.map_pub         = self.create_publisher(OccupancyGrid, '/map', _latched)
+        self.path_pub        = self.create_publisher(Path, '/planned_path', 10)
+        self.robot_pose_pub  = self.create_publisher(PoseStamped, '/robot_pose', 10)
+        self.init_pose_pub   = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
 
         self.create_subscription(LaserScan, f'{NAMESPACE}/scan', self.scan_cb, 10)
         self.create_subscription(
@@ -260,15 +264,18 @@ class AutonomousNav(Node):
             f'{NAMESPACE}/oakd/rgb/image_raw/compressed',
             self.image_cb, 10)
         self.create_subscription(Odometry, f'{NAMESPACE}/odom', self.odom_cb, 10)
+        self.create_subscription(
+            PoseWithCovarianceStamped, AMCL_TOPIC, self.amcl_cb, 10)
 
         # LiDAR
         self.nearest_front      = float('inf')
         self.nearest_cube_front = float('inf')
 
-        # Odometry
+        # Pose — updated by AMCL when available, falls back to odometry
         self.current_x   = 0.0
         self.current_y   = 0.0
         self.current_yaw = 0.0
+        self.use_amcl    = False   # True once first AMCL pose received
 
         # Camera
         self.bridge      = CvBridge()
@@ -373,12 +380,38 @@ class AutonomousNav(Node):
                 self.lost_cube_ticks = 0
 
     def odom_cb(self, msg):
+        if self.use_amcl:
+            return   # AMCL pose takes priority
         self.current_x = msg.pose.pose.position.x
         self.current_y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
         self.current_yaw = math.atan2(
             2*(q.w*q.z + q.x*q.y),
             1 - 2*(q.y*q.y + q.z*q.z))
+
+    def amcl_cb(self, msg):
+        """AMCL corrected pose in map frame — replaces raw odometry."""
+        if not self.use_amcl:
+            self.use_amcl = True
+            self.get_logger().info('AMCL pose received — switching to map-frame localisation')
+        self.current_x = msg.pose.pose.position.x
+        self.current_y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        self.current_yaw = math.atan2(
+            2*(q.w*q.z + q.x*q.y),
+            1 - 2*(q.y*q.y + q.z*q.z))
+
+    def _publish_initial_pose(self):
+        """Seed AMCL: robot starts at map origin (0,0) facing +x."""
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp    = self.get_clock().now().to_msg()
+        msg.pose.pose.orientation.w = 1.0
+        msg.pose.covariance[0]  = 0.25   # σ²_x
+        msg.pose.covariance[7]  = 0.25   # σ²_y
+        msg.pose.covariance[35] = 0.06   # σ²_yaw
+        self.init_pose_pub.publish(msg)
+        self.get_logger().info('Published AMCL initial pose → (0, 0, facing +x)')
 
     # ── Control Loop ──────────────────────────────────────────────────────────
 
@@ -405,17 +438,19 @@ class AutonomousNav(Node):
     # ── State Behaviours ──────────────────────────────────────────────────────
 
     def do_planning(self):
-        """Hold still for PLAN_WAIT_TICKS so the path is visible in Rviz before moving."""
+        """Seed AMCL, hold still for PLAN_WAIT_TICKS so path is visible before moving."""
         self.stop()
         self.plan_ticks += 1
         if self.plan_ticks == 1:
+            self._publish_initial_pose()
             self.get_logger().info(
                 f'Path planned ({len(self.waypoints)} waypoints). '
                 f'Starting in {PLAN_WAIT_TICKS/10:.0f}s — check Rviz now.')
         if self.plan_ticks >= PLAN_WAIT_TICKS:
             self.state = NAVIGATING
-            self.start_time = time.time()  # reset timer — don't count planning wait
-            self.get_logger().info('Starting navigation')
+            self.start_time = time.time()
+            self.get_logger().info(
+                f'Starting navigation (localisation: {"AMCL" if self.use_amcl else "odometry"})')
 
     def do_navigating(self):
         self._follow_waypoints()
@@ -606,7 +641,7 @@ class AutonomousNav(Node):
 
     def _publish_robot_pose(self):
         ps = PoseStamped()
-        ps.header.frame_id = 'odom'
+        ps.header.frame_id = 'map'
         ps.header.stamp    = self.get_clock().now().to_msg()
         ps.pose.position.x = self.current_x
         ps.pose.position.y = self.current_y
@@ -617,7 +652,7 @@ class AutonomousNav(Node):
     def _publish_map(self):
         """Publish the inflated occupancy grid (static + dynamic obstacles)."""
         og = OccupancyGrid()
-        og.header.frame_id = 'odom'
+        og.header.frame_id = 'map'
         og.header.stamp    = self.get_clock().now().to_msg()
         og.info.resolution = self.omap.resolution
         og.info.width      = self.omap.width
@@ -644,7 +679,7 @@ class AutonomousNav(Node):
     def _publish_path(self):
         """Publish current waypoint list as a Path for Rviz."""
         msg = Path()
-        msg.header.frame_id = 'odom'
+        msg.header.frame_id = 'map'
         msg.header.stamp    = self.get_clock().now().to_msg()
         for wx, wy in self.waypoints:
             ps = PoseStamped()

@@ -158,7 +158,7 @@ class SearchAndNavigate(Node):
             return min(vals) if vals else float('inf')
 
         self.nearest_front = arc_min(front_i - half_a, front_i + half_a)
-        self.nearest_right = arc_min(0, front_i - half_a)
+        self.nearest_right = arc_min(0, 10)
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
 
