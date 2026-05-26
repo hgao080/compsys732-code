@@ -240,13 +240,14 @@ class AutonomousNav(Node):
             f'res={self.omap.resolution:.3f} m/px')
 
         self.cmd_pub  = self.create_publisher(Twist, f'{NAMESPACE}/cmd_vel', 10)
-        # Latched QoS so Rviz gets the map even if it connects after publish
+        # Latched QoS so Rviz gets map/path even if it connects after publish
         _latched = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE)
-        self.map_pub  = self.create_publisher(OccupancyGrid, '/map', _latched)
-        self.path_pub = self.create_publisher(Path, '/planned_path', 10)
+        self.map_pub       = self.create_publisher(OccupancyGrid, '/map', _latched)
+        self.path_pub      = self.create_publisher(Path, '/planned_path', _latched)
+        self.robot_pose_pub = self.create_publisher(PoseStamped, '/robot_pose', 10)
 
         self.create_subscription(LaserScan, f'{NAMESPACE}/scan', self.scan_cb, 10)
         self.create_subscription(
@@ -382,6 +383,7 @@ class AutonomousNav(Node):
             self.state = RETURNING
             return
 
+        self._publish_robot_pose()
         {
             NAVIGATING:  self.do_navigating,
             AVOIDING:    self.do_avoiding,
@@ -567,6 +569,16 @@ class AutonomousNav(Node):
                              oy + offset * math.sin(perp)))
         self.omap.mark_obstacles(pts)
         self._publish_map()
+
+    def _publish_robot_pose(self):
+        ps = PoseStamped()
+        ps.header.frame_id = 'odom'
+        ps.header.stamp    = self.get_clock().now().to_msg()
+        ps.pose.position.x = self.current_x
+        ps.pose.position.y = self.current_y
+        ps.pose.orientation.z = math.sin(self.current_yaw / 2)
+        ps.pose.orientation.w = math.cos(self.current_yaw / 2)
+        self.robot_pose_pub.publish(ps)
 
     def _publish_map(self):
         """Publish the inflated occupancy grid (static + dynamic obstacles)."""
