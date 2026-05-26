@@ -11,14 +11,14 @@ NAMESPACE        = 'T24'  # ← change to your robot namespace
 FORWARD_SPEED    = 0.15   # m/s
 TURN_SPEED       = 0.6    # rad/s
 AVOID_DISTANCE   = 0.35   # metres — obstacle too close
-FRONT_ARC_DEG    = 35     # degrees either side of forward
+FRONT_ARC_DEG    = 30     # degrees either side of forward
 CUBE_RANGE_ARC_DEG = 10  # degrees either side of forward for cube range estimate
 FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
 # ── Wall Follow Config ────────────────────────────────────────────────────────
-WALL_LOST_THRESHOLD    = 0.45  # metres — right wall distance to declare wall lost
+WALL_LOST_THRESHOLD    = 0.4  # metres — right wall distance to declare wall lost
 WALL_FOUND_THRESHOLD   = 0.33  # metres — wall reacquired (hysteresis, < WALL_LOST_THRESHOLD)
-WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
+WALL_LOST_SPEED        = 0.08  # m/s — forward speed when reacquiring right wall
 WALL_LOST_TURN         = 0.7  # rad/s — turn speed when reacquiring right wall
 WALL_TARGET_DIST       = 0.29  # metres — desired distance to right wall
 WALL_KP                = 1.2   # proportional gain for right-wall distance control
