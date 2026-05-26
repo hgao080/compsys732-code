@@ -16,10 +16,11 @@ CUBE_RANGE_ARC_DEG = 10  # degrees either side of forward for cube range estimat
 FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
 # ── Wall Follow Config ────────────────────────────────────────────────────────
-WALL_LOST_THRESHOLD    = 0.3  # metres — right wall distance to declare wall lost
-WALL_LOST_SPEED        = 0.12  # m/s — forward speed when reacquiring right wall
+WALL_LOST_THRESHOLD    = 0.45  # metres — right wall distance to declare wall lost
+WALL_FOUND_THRESHOLD   = 0.33  # metres — wall reacquired (hysteresis, < WALL_LOST_THRESHOLD)
+WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
 WALL_LOST_TURN         = 0.7  # rad/s — turn speed when reacquiring right wall
-WALL_TARGET_DIST       = 0.3  # metres — desired distance to right wall
+WALL_TARGET_DIST       = 0.29  # metres — desired distance to right wall
 WALL_KP                = 1.2   # proportional gain for right-wall distance control
 
 # ── Find-Wall Config ──────────────────────────────────────────────────────────
@@ -43,7 +44,7 @@ RED_LOW1  = np.array([0,   95,  95])
 RED_HIGH1 = np.array([8,  255, 255])
 RED_LOW2  = np.array([177, 95,  95])
 RED_HIGH2 = np.array([180, 255, 255])
-MIN_PIXELS_SWEEP_FLAG = 2000  # glimpsed cube, arm sweep at next obstacle
+MIN_PIXELS_SWEEP_FLAG = 3000  # glimpsed cube, arm sweep at next obstacle
 MIN_PIXELS_CENTRE     = 8500 # enter CENTRE_ON_CUBE from WALL_FOLLOW
 
 # ── Return Config ─────────────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ class SearchAndNavigate(Node):
         self.nearest_front = float('inf')
         self.nearest_right = float('inf')
         self.nearest_cube_front = float('inf')
+        self.wall_lost = True
 
         # Odometry state
         self.current_x   = 0.0
@@ -159,7 +161,7 @@ class SearchAndNavigate(Node):
             return min(vals) if vals else float('inf')
 
         self.nearest_front = arc_min(front_i - half_a, front_i + half_a)
-        self.nearest_right = arc_min(0, 10)
+        self.nearest_right = arc_min(0, front_i - half_a)
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
 
@@ -294,12 +296,21 @@ class SearchAndNavigate(Node):
                 f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
         elif self.nearest_right > WALL_LOST_THRESHOLD:
+            self.wall_lost = True
             msg.linear.x  = WALL_LOST_SPEED
             msg.angular.z = -WALL_LOST_TURN
             self.get_logger().info(
                 f'Right wall lost ({self.nearest_right:.2f} m) — curving RIGHT')
 
+        elif self.wall_lost and self.nearest_right > WALL_FOUND_THRESHOLD:
+            # Hysteresis: still reacquiring — keep hard turn until wall is close enough
+            msg.linear.x  = WALL_LOST_SPEED
+            msg.angular.z = -WALL_LOST_TURN
+            self.get_logger().info(
+                f'Reacquiring wall ({self.nearest_right:.2f} m > {WALL_FOUND_THRESHOLD} m)')
+
         else:
+            self.wall_lost = False
             error = self.nearest_right - WALL_TARGET_DIST
             msg.linear.x  = FORWARD_SPEED
             msg.angular.z = -WALL_KP * error
