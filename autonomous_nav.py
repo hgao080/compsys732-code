@@ -245,8 +245,8 @@ class AutonomousNav(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE)
-        self.map_pub       = self.create_publisher(OccupancyGrid, '/map', _latched)
-        self.path_pub      = self.create_publisher(Path, '/planned_path', _latched)
+        self.map_pub        = self.create_publisher(OccupancyGrid, '/map', _latched)
+        self.path_pub       = self.create_publisher(Path, '/planned_path', 10)
         self.robot_pose_pub = self.create_publisher(PoseStamped, '/robot_pose', 10)
 
         self.create_subscription(LaserScan, f'{NAMESPACE}/scan', self.scan_cb, 10)
@@ -300,7 +300,8 @@ class AutonomousNav(Node):
         self._replan((target_x, target_y), SPINNING)
         self._publish_map()
 
-        self.timer = self.create_timer(0.1, self.control_loop)
+        self.timer     = self.create_timer(0.1, self.control_loop)
+        self.viz_timer = self.create_timer(1.0, self._publish_path)
         self.get_logger().info(
             f'Started | target=({target_x:.2f},{target_y:.2f}) '
             f'waypoints={len(self.waypoints)} state={NAVIGATING}')
@@ -502,14 +503,15 @@ class AutonomousNav(Node):
             self.state = self.nav_arrive_state
             return
 
-        # Front obstacle → mark it and avoid
-        if self.nearest_front < AVOID_DIST:
+        # Only avoid if obstacle is NOT on the static map (Phase-2 cylinder).
+        # Known walls are already accounted for by A* — reacting to them
+        # corrupts the dynamic layer and causes re-plan loops.
+        if self.nearest_front < AVOID_DIST and not self._static_obstacle_ahead():
             self._mark_front_obstacle()
-            self.avoid_return_state = self.state  # NAVIGATING or RETURNING
+            self.avoid_return_state = self.state
             self.state = AVOIDING
             self.get_logger().warn(
-                f'Obstacle {self.nearest_front:.2f}m → AVOIDING '
-                f'(will re-plan after)')
+                f'New obstacle {self.nearest_front:.2f}m → AVOIDING')
             return
 
         tx, ty = self.waypoints[0]
@@ -569,6 +571,18 @@ class AutonomousNav(Node):
                              oy + offset * math.sin(perp)))
         self.omap.mark_obstacles(pts)
         self._publish_map()
+
+    def _static_obstacle_ahead(self):
+        """True if the nearest front obstacle is already in the static map."""
+        d = self.nearest_front
+        if d == float('inf'):
+            return False
+        obs_x = self.current_x + d * math.cos(self.current_yaw)
+        obs_y = self.current_y + d * math.sin(self.current_yaw)
+        c, r = self.omap.world_to_grid(obs_x, obs_y)
+        if not self.omap.in_bounds(c, r):
+            return False
+        return bool(self.omap._static[r, c])
 
     def _publish_robot_pose(self):
         ps = PoseStamped()
