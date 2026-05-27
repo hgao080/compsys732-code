@@ -23,7 +23,7 @@ WALL_TARGET_DIST       = 0.28  # metres — desired distance to right wall
 WALL_KD                = 1.2   # proportional gain — perpendicular distance error
 WALL_KH                = 1.0   # proportional gain — wall heading angle error (new)
 WALL_PERP_ANGLE_DEG    = 0     # scan-frame angle for perpendicular-right reading
-WALL_DIAG_ANGLE_DEG    = 45    # scan-frame angle for ahead-right diagonal reading
+WALL_DIAG_ANGLE_DEG    = 30    # scan-frame angle for ahead-right diagonal reading (30 reduces corner look-ahead vs 45)
 WALL_AVG_HALF_DEG      = 3     # half-arc width used to average each reading
 
 # ── Find-Wall Config ──────────────────────────────────────────────────────────
@@ -169,13 +169,22 @@ class SearchAndNavigate(Node):
         phi_p = math.radians(WALL_PERP_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −85°
         phi_d = math.radians(WALL_DIAG_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −45°
 
+        # Perpendicular distance (exact when phi_p = −90°, rp = d_perp)
+        d_perp = abs(rp * math.sin(phi_p))
+
+        # Corner sanity check: diagonal ray sees around a corner when rd is much
+        # larger than the geometrically expected value for a parallel wall.
+        # Expected: rd_parallel = d_perp / |sin(phi_d)|
+        rd_expected = d_perp / abs(math.sin(phi_d))
+        if rd > rd_expected * 1.5:
+            # Diagonal is seeing past a corner — suppress heading correction,
+            # use distance-only control to avoid premature turning.
+            return d_perp - WALL_TARGET_DIST, 0.0
+
         # Wall direction vector: two wall points in body frame
         ab_x = rd * math.cos(phi_d) - rp * math.cos(phi_p)
         ab_y = rd * math.sin(phi_d) - rp * math.sin(phi_p)
         psi  = math.atan2(ab_y, ab_x)   # 0 = parallel; +ve = converging to wall
-
-        # Perpendicular distance (rp projected onto wall normal)
-        d_perp = abs(rp * math.sin(phi_p))   # ≈ rp since phi_p ≈ −90°
 
         return d_perp - WALL_TARGET_DIST, psi
 
