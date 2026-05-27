@@ -11,17 +11,20 @@ NAMESPACE        = 'T24'  # ← change to your robot namespace
 FORWARD_SPEED    = 0.15   # m/s
 TURN_SPEED       = 0.6    # rad/s
 AVOID_DISTANCE   = 0.35   # metres — obstacle too close
-FRONT_ARC_DEG    = 30     # degrees either side of forward
+FRONT_ARC_DEG    = 35     # degrees either side of forward
 CUBE_RANGE_ARC_DEG = 10  # degrees either side of forward for cube range estimate
 FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
 # ── Wall Follow Config ────────────────────────────────────────────────────────
 WALL_LOST_THRESHOLD    = 0.4  # metres — right wall distance to declare wall lost
-WALL_FOUND_THRESHOLD   = 0.33  # metres — wall reacquired (hysteresis, < WALL_LOST_THRESHOLD)
-WALL_LOST_SPEED        = 0.08  # m/s — forward speed when reacquiring right wall
-WALL_LOST_TURN         = 0.7  # rad/s — turn speed when reacquiring right wall
-WALL_TARGET_DIST       = 0.29  # metres — desired distance to right wall
-WALL_KP                = 1.2   # proportional gain for right-wall distance control
+WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
+WALL_LOST_TURN         = 0.4   # rad/s — turn speed when reacquiring right wall (was 0.8)
+WALL_TARGET_DIST       = 0.28  # metres — desired distance to right wall
+WALL_KD                = 1.2   # proportional gain — perpendicular distance error
+WALL_KH                = 1.0   # proportional gain — wall heading angle error (new)
+WALL_PERP_ANGLE_DEG    = 0     # scan-frame angle for perpendicular-right reading
+WALL_DIAG_ANGLE_DEG    = 45    # scan-frame angle for ahead-right diagonal reading
+WALL_AVG_HALF_DEG      = 3     # half-arc width used to average each reading
 
 # ── Find-Wall Config ──────────────────────────────────────────────────────────
 FIND_WALL_WAIT_TICKS = 10   # ticks to hold still on startup (1 s at 10 Hz)
@@ -44,7 +47,7 @@ RED_LOW1  = np.array([0,   95,  95])
 RED_HIGH1 = np.array([8,  255, 255])
 RED_LOW2  = np.array([177, 95,  95])
 RED_HIGH2 = np.array([180, 255, 255])
-MIN_PIXELS_SWEEP_FLAG = 3000  # glimpsed cube, arm sweep at next obstacle
+MIN_PIXELS_SWEEP_FLAG = 2000  # glimpsed cube, arm sweep at next obstacle
 MIN_PIXELS_CENTRE     = 8500 # enter CENTRE_ON_CUBE from WALL_FOLLOW
 
 # ── Return Config ─────────────────────────────────────────────────────────────
@@ -86,10 +89,11 @@ class SearchAndNavigate(Node):
             self.odom_callback, 10)
 
         # LiDAR state
-        self.nearest_front = float('inf')
-        self.nearest_right = float('inf')
+        self.nearest_front      = float('inf')
+        self.nearest_right      = float('inf')
         self.nearest_cube_front = float('inf')
-        self.wall_lost = True
+        self.wall_perp          = float('inf')   # range at WALL_PERP_ANGLE_DEG
+        self.wall_diag          = float('inf')   # range at WALL_DIAG_ANGLE_DEG
 
         # Odometry state
         self.current_x   = 0.0
@@ -144,6 +148,37 @@ class SearchAndNavigate(Node):
         # Normalise to [-π, π]
         return math.atan2(math.sin(err), math.cos(err))
 
+    def _wall_errors(self):
+        """Dual-P wall errors from two right-side LiDAR readings.
+
+        Returns (dist_err, heading_err):
+          dist_err    = d_perp − WALL_TARGET_DIST  (+ve → too far from wall)
+          heading_err = ψ in radians               (+ve → converging, turn left)
+        Returns (inf, 0.0) when wall is not visible.
+
+        Method: compute wall direction vector from two body-frame points,
+        derive angle ψ (= 0 when robot is parallel to wall).
+        """
+        rp = self.wall_perp   # range ≈ perpendicular to wall
+        rd = self.wall_diag   # range at WALL_DIAG_ANGLE_DEG (ahead-right)
+
+        if rp >= WALL_LOST_THRESHOLD or rd == float('inf'):
+            return float('inf'), 0.0
+
+        # Body-frame angles from forward (x-axis): 0 = forward, −90° = directly right
+        phi_p = math.radians(WALL_PERP_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −85°
+        phi_d = math.radians(WALL_DIAG_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −45°
+
+        # Wall direction vector: two wall points in body frame
+        ab_x = rd * math.cos(phi_d) - rp * math.cos(phi_p)
+        ab_y = rd * math.sin(phi_d) - rp * math.sin(phi_p)
+        psi  = math.atan2(ab_y, ab_x)   # 0 = parallel; +ve = converging to wall
+
+        # Perpendicular distance (rp projected onto wall normal)
+        d_perp = abs(rp * math.sin(phi_p))   # ≈ rp since phi_p ≈ −90°
+
+        return d_perp - WALL_TARGET_DIST, psi
+
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
     def scan_callback(self, msg):
@@ -164,6 +199,13 @@ class SearchAndNavigate(Node):
         self.nearest_right = arc_min(0, front_i - half_a)
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
+
+        # Two-point right-wall readings for parallel P controller
+        perp_i = int(round(math.radians(WALL_PERP_ANGLE_DEG) / inc))
+        diag_i = int(round(math.radians(WALL_DIAG_ANGLE_DEG) / inc))
+        avg_hw = max(1, int(round(math.radians(WALL_AVG_HALF_DEG) / inc)))
+        self.wall_perp = arc_min(max(0, perp_i - avg_hw), perp_i + avg_hw)
+        self.wall_diag = arc_min(diag_i - avg_hw, diag_i + avg_hw)
 
     def image_callback(self, msg):
         """Detect red cube using HSV masking."""
@@ -201,11 +243,11 @@ class SearchAndNavigate(Node):
             self.sweep_flag = True
 
         # Trigger centering when cube first detected during wall search
-        # if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_CENTRE:
-        #     self.state = CENTRE_ON_CUBE
-        #     self.centre_ticks = 0
-        #     self.get_logger().info(
-        #         f'Red cube detected ({pixels} px)! Switching → CENTRE_ON_CUBE')
+        if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_CENTRE:
+            self.state = CENTRE_ON_CUBE
+            self.centre_ticks = 0
+            self.get_logger().info(
+                f'Red cube detected ({pixels} px)! Switching → CENTRE_ON_CUBE')
 
         # Only revert to wall follow if cube is gone for 10 consecutive frames (~1 s)
         if self.state == CENTRE_ON_CUBE:
@@ -280,7 +322,12 @@ class SearchAndNavigate(Node):
         self.publisher.publish(msg)
 
     def do_wall_follow(self):
-        """Follow the right wall through the C-shaped corridor."""
+        """Follow right wall with dual-P parallel controller.
+
+        Two independent P terms:
+          WALL_KD × dist_err   — keeps perpendicular distance on target
+          WALL_KH × heading_err — keeps robot parallel to wall (ψ = 0)
+        """
         msg = Twist()
 
         if self.nearest_front < AVOID_DISTANCE:
@@ -288,37 +335,32 @@ class SearchAndNavigate(Node):
                 self.sweep_ticks = 0
                 self.state = SWEEP
                 self.get_logger().info(
-                    f'Front obstacle + sweep flag — switching → SWEEP')
+                    'Front obstacle + sweep flag — switching → SWEEP')
                 return
             msg.linear.x  = 0.0
             msg.angular.z = TURN_SPEED
             self.get_logger().warn(
                 f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
-        elif self.nearest_right > WALL_LOST_THRESHOLD:
-            self.wall_lost = True
-            msg.linear.x  = WALL_LOST_SPEED
-            msg.angular.z = -WALL_LOST_TURN
-            self.get_logger().info(
-                f'Right wall lost ({self.nearest_right:.2f} m) — curving RIGHT')
-
-        elif self.wall_lost and self.nearest_right > WALL_FOUND_THRESHOLD:
-            # Hysteresis: still reacquiring — keep hard turn until wall is close enough
-            msg.linear.x  = WALL_LOST_SPEED
-            msg.angular.z = -WALL_LOST_TURN
-            self.get_logger().info(
-                f'Reacquiring wall ({self.nearest_right:.2f} m > {WALL_FOUND_THRESHOLD} m)')
-
         else:
-            self.wall_lost = False
-            error = self.nearest_right - WALL_TARGET_DIST
-            msg.linear.x  = FORWARD_SPEED
-            msg.angular.z = -WALL_KP * error
-            self.get_logger().info(
-                f'Wall follow | right={self.nearest_right:.2f} m '
-                f'err={error:.2f} m spin={msg.angular.z:.2f} '
-                f'front={self.nearest_front:.2f} m '
-                f'pos=({self.current_x:.2f}, {self.current_y:.2f})')
+            dist_err, heading_err = self._wall_errors()
+
+            if dist_err == float('inf'):
+                # Wall not visible — slow curve right to reacquire
+                msg.linear.x  = WALL_LOST_SPEED
+                msg.angular.z = -WALL_LOST_TURN
+                self.get_logger().info(
+                    f'Right wall lost (perp={self.wall_perp:.2f} m) — curving RIGHT')
+            else:
+                # Dual-P: heading correction dominates alignment; distance keeps gap
+                msg.linear.x  = FORWARD_SPEED
+                msg.angular.z = WALL_KH * heading_err - WALL_KD * dist_err
+                self.get_logger().info(
+                    f'Wall follow | perp={self.wall_perp:.2f} m '
+                    f'dist_err={dist_err:+.3f} m '
+                    f'ψ={math.degrees(heading_err):+.1f}° '
+                    f'cmd_z={msg.angular.z:+.2f} '
+                    f'pos=({self.current_x:.2f},{self.current_y:.2f})')
 
         self.publisher.publish(msg)
 
