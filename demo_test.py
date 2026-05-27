@@ -10,10 +10,8 @@ from cv_bridge import CvBridge
 NAMESPACE        = 'T24'  # ← change to your robot namespace
 FORWARD_SPEED    = 0.15   # m/s
 TURN_SPEED       = 0.6    # rad/s
-AVOID_DISTANCE        = 0.35   # metres — obstacle too close (front arc)
-FRONT_ARC_DEG         = 50     # degrees either side of forward (was 35 — widened to reduce right-forward blind zone)
-RIGHT_SIDE_AVOID_DIST = 0.20   # metres — unexpected obstacle in right-forward arc
-OBSTACLE_ESCAPE_TICKS = 12     # ticks to drive straight after clearing obstacle (~1.2 s, 0.18 m)
+AVOID_DISTANCE   = 0.35   # metres — obstacle too close
+FRONT_ARC_DEG    = 35     # degrees either side of forward
 CUBE_RANGE_ARC_DEG = 10  # degrees either side of forward for cube range estimate
 FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
@@ -118,9 +116,6 @@ class SearchAndNavigate(Node):
         self.centre_ticks     = 0   # ticks spent in CENTRE_ON_CUBE
         self.red_pixels       = 0
 
-        # Obstacle escape state
-        self.obstacle_escape_ticks = 0   # counts down after clearing a front/right obstacle
-
         # Sweep state
         self.sweep_flag            = False
         self.sweep_ticks           = 0
@@ -210,7 +205,7 @@ class SearchAndNavigate(Node):
             return min(vals) if vals else float('inf')
 
         self.nearest_front = arc_min(front_i - half_a, front_i + half_a)
-        self.nearest_right = arc_min(0, front_i - half_a)
+        self.nearest_right = arc_min(0, 5)
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
 
@@ -351,32 +346,10 @@ class SearchAndNavigate(Node):
                 self.get_logger().info(
                     'Front obstacle + sweep flag — switching → SWEEP')
                 return
-            # Arm escape so robot drives straight after clearing (prevents re-adopting
-            # the cylinder as the wall and pushing it forward).
-            self.obstacle_escape_ticks = OBSTACLE_ESCAPE_TICKS
             msg.linear.x  = 0.0
             msg.angular.z = TURN_SPEED
             self.get_logger().warn(
-                f'Front obstacle ({self.nearest_front:.2f} m) — turning LEFT')
-
-        elif self.nearest_right < RIGHT_SIDE_AVOID_DIST:
-            # Obstacle in right-forward blind zone (scan 5°–55°, outside front arc).
-            # nearest_right in normal wall-following ≈ WALL_TARGET_DIST (0.28 m),
-            # so < 0.20 m means an unexpected object, not the followed wall.
-            self.obstacle_escape_ticks = OBSTACLE_ESCAPE_TICKS
-            msg.linear.x  = 0.0
-            msg.angular.z = TURN_SPEED
-            self.get_logger().warn(
-                f'Right-side obstacle ({self.nearest_right:.2f} m) — turning LEFT')
-
-        elif self.obstacle_escape_ticks > 0:
-            # Just cleared obstacle — drive straight to escape before wall follow
-            # resumes right-curving (which would re-adopt the cylinder as the wall).
-            self.obstacle_escape_ticks -= 1
-            msg.linear.x  = FORWARD_SPEED
-            msg.angular.z = 0.0
-            self.get_logger().info(
-                f'Obstacle escape: {self.obstacle_escape_ticks} ticks remaining')
+                f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
         else:
             dist_err, heading_err = self._wall_errors()
