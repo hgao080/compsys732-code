@@ -55,7 +55,7 @@ import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot / Topic Config ──────────────────────────────────────────────────────
-NAMESPACE   = 'T7'                       # ← your robot namespace ('' for none)
+NAMESPACE   = 'T8'                       # ← your robot namespace ('' for none)
 CMD_VEL     = f'{NAMESPACE}/cmd_vel'
 SCAN_TOPIC  = f'{NAMESPACE}/scan'
 ODOM_TOPIC  = f'{NAMESPACE}/odom'
@@ -84,7 +84,7 @@ GOAL_TOLERANCE  = 0.18        # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 ROBOT_RADIUS     = 0.18       # TurtleBot4 ~0.17 m radius
-INFLATION_RADIUS = 0.28       # metres — obstacles grown by this for planning
+INFLATION_RADIUS = 0.2       # metres — obstacles grown by this for planning
 PLAN_RESOLUTION  = 0.05       # metres/cell for the planner (map is coarsened to this)
 REPLAN_PERIOD_S  = 1.0        # seconds — periodic replan cadence
 MAX_RECOVERIES   = 6          # consecutive plan failures before giving up
