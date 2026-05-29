@@ -196,6 +196,8 @@ class AStarNav(Node):
         self.current_y = START_Y
         self.current_yaw = START_YAW
         self.pose_ok = (POSE_SOURCE == 'odom')        # odom assumed available; amcl waits for TF
+        self.tf_err = ''                              # last TF lookup failure reason
+        self._wait_log = 0                            # throttle WAIT_FOR_POSE logging
 
         # ── LiDAR state ──
         self.front_min = float('inf')
@@ -281,8 +283,9 @@ class AStarNav(Node):
             self.current_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                                           1.0 - 2.0 * (q.y * q.y + q.z * q.z))
             self.pose_ok = True
-        except (LookupException, ConnectivityException, ExtrapolationException):
-            pass  # keep last known pose; AMCL not ready yet
+            self.tf_err = ''
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.tf_err = type(e).__name__  # keep last known pose; AMCL not ready yet
 
     def odom_callback(self, msg):
         self.current_x = msg.pose.pose.position.x
@@ -517,6 +520,11 @@ class AStarNav(Node):
                 self.get_logger().info('Pose + scan ready — NAVIGATE')
             else:
                 self.cmd_pub.publish(Twist())
+                self._wait_log += 1
+                if self._wait_log % 20 == 0:   # every ~2 s
+                    self.get_logger().warn(
+                        f'WAIT_FOR_POSE: pose_ok={self.pose_ok} have_scan={self.have_scan} '
+                        f'tf({MAP_FRAME}->{BASE_FRAME}) err={self.tf_err or "none"}')
 
         elif self.state == NAVIGATE:
             if self.dist_to_goal() < GOAL_TOLERANCE:
