@@ -353,16 +353,17 @@ class SearchAndNavigate(Node):
                 f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
         else:
-            self.peek_done = False   # obstacle cleared — ready to peek at the next one
             dist_err, heading_err = self._wall_errors()
 
             if dist_err == float('inf'):
-                # Wall not visible — spin right in place to reacquire (no forward to avoid clipping obstacles)
-                msg.linear.x  = 0.0
+                # Wall not visible — slow forward + curve right; lets robot find cylinder surface or corridor wall
+                msg.linear.x  = WALL_LOST_SPEED
                 msg.angular.z = -WALL_LOST_TURN
                 self.get_logger().info(
-                    f'Right wall lost (perp={self.wall_perp:.2f} m) — spinning RIGHT')
+                    f'Right wall lost (perp={self.wall_perp:.2f} m) — curving RIGHT')
             else:
+                # Wall properly acquired — safe to arm peek for the next obstacle
+                self.peek_done = False
                 # Dual-P: heading correction dominates alignment; distance keeps gap
                 msg.linear.x  = FORWARD_SPEED
                 msg.angular.z = WALL_KH * heading_err - WALL_KD * dist_err
