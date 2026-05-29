@@ -54,7 +54,7 @@ import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot / Topic Config ──────────────────────────────────────────────────────
-NAMESPACE   = 'T24'                       # ← your robot namespace ('' for none)
+NAMESPACE   = 'T8'                       # ← your robot namespace ('' for none)
 CMD_VEL     = f'{NAMESPACE}/cmd_vel'
 SCAN_TOPIC  = f'{NAMESPACE}/scan'
 ODOM_TOPIC  = f'{NAMESPACE}/odom'
@@ -63,17 +63,17 @@ MAP_FRAME   = 'map'
 BASE_FRAME  = f'{NAMESPACE}/base_link'
 
 # ── Map Config ────────────────────────────────────────────────────────────────
-MAP_YAML_PATH = os.path.expanduser('~/maps/course.yaml')  # ← saved map .yaml
+MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_mapss.yaml')  # ← saved map .yaml
 ALLOW_UNKNOWN = False     # treat unknown (-1) map cells as obstacles (safer = False)
 
 # ── Pose Source ───────────────────────────────────────────────────────────────
-POSE_SOURCE = 'amcl'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom only)
+POSE_SOURCE = 'odom'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom only)
 SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for 'amcl')
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
-GOAL_X, GOAL_Y  = 3.0, 0.0    # ← read these off your map (metres, map frame)
+GOAL_X, GOAL_Y  = 0.322, -2.56    # ← read these off your map (metres, map frame)
 GOAL_TOLERANCE  = 0.18        # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────

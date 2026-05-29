@@ -8,7 +8,7 @@ import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot Config ──────────────────────────────────────────────────────────────
-NAMESPACE         = 'T24'  # ← change to your robot namespace
+NAMESPACE         = 'T8'  # ← change to your robot namespace
 FORWARD_SPEED     = 0.15   # m/s
 TURN_SPEED        = 0.6    # rad/s
 AVOID_DISTANCE    = 0.35   # metres — obstacle too close
