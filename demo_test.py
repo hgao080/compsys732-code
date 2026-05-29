@@ -91,7 +91,6 @@ class SearchAndNavigate(Node):
 
         # LiDAR state
         self.nearest_front      = float('inf')
-        self.nearest_right      = float('inf')
         self.nearest_cube_front = float('inf')
         self.wall_perp          = float('inf')   # range at WALL_PERP_ANGLE_DEG
         self.wall_diag          = float('inf')   # range at WALL_DIAG_ANGLE_DEG
@@ -209,7 +208,6 @@ class SearchAndNavigate(Node):
             return min(vals) if vals else float('inf')
 
         self.nearest_front = arc_min(front_i - half_a, front_i + half_a)
-        self.nearest_right = arc_min(0, front_i - half_a) 
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
 
@@ -359,11 +357,11 @@ class SearchAndNavigate(Node):
             dist_err, heading_err = self._wall_errors()
 
             if dist_err == float('inf'):
-                # Wall not visible — slow curve right to reacquire
-                msg.linear.x  = WALL_LOST_SPEED
+                # Wall not visible — spin right in place to reacquire (no forward to avoid clipping obstacles)
+                msg.linear.x  = 0.0
                 msg.angular.z = -WALL_LOST_TURN
                 self.get_logger().info(
-                    f'Right wall lost (perp={self.wall_perp:.2f} m) — curving RIGHT')
+                    f'Right wall lost (perp={self.wall_perp:.2f} m) — spinning RIGHT')
             else:
                 # Dual-P: heading correction dominates alignment; distance keeps gap
                 msg.linear.x  = FORWARD_SPEED
