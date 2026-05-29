@@ -78,43 +78,49 @@ finally:
     rclpy.shutdown()
 '''
 
-# Scan re-stamp relay, embedded. argv[1]=in scan, argv[2]=out scan, argv[3]=odom.
-# Root problem: the robot's odom (Create3) and scan (RPi) are on DIFFERENT clocks
-# (~1.4 s apart), so AMCL can never get the odom transform at the scan's time.
-# Fix: stamp each scan with the LATEST odom timestamp -> scan and odom now share
-# the odom clock, so AMCL's tf lookup always lands on a real odom transform.
-# Only runs when restamp:=true.
+# Scan re-stamp relay, embedded.
+#   argv[1]=in scan, argv[2]=out scan, argv[3]=odom frame, argv[4]=base frame.
+# Root problem: odom (Create3) and scan (RPi) are on different clocks, AND the
+# /odom TOPIC (create3_repub) runs ahead of the odom->base TF on /tf. AMCL looks
+# up the TF, so stamping from the odom topic still lands in the TF's future
+# ("queue full"). Fix: stamp each scan with the timestamp of the LATEST
+# odom->base TF that actually exists on /tf -> AMCL's lookup at that time is
+# guaranteed to succeed. Only runs when restamp:=true.
 RESTAMP_CODE = r'''
 import sys
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
+import tf2_ros
 
 IN_TOPIC   = sys.argv[1] if len(sys.argv) > 1 else "/T7/scan"
 OUT_TOPIC  = sys.argv[2] if len(sys.argv) > 2 else "/T7/scan_restamped"
-ODOM_TOPIC = sys.argv[3] if len(sys.argv) > 3 else "/T7/odom"
+ODOM_FRAME = sys.argv[3] if len(sys.argv) > 3 else "T7/odom"
+BASE_FRAME = sys.argv[4] if len(sys.argv) > 4 else "T7/base_link"
 
 class Restamp(Node):
     def __init__(self):
         super().__init__("scan_restamp")
         scan_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                               history=HistoryPolicy.KEEP_LAST, depth=10)
-        odom_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
-                              history=HistoryPolicy.KEEP_LAST, depth=10)
-        self.last_odom = None
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.pub = self.create_publisher(LaserScan, OUT_TOPIC, scan_qos)
-        self.create_subscription(Odometry, ODOM_TOPIC, self.odom_cb, odom_qos)
         self.create_subscription(LaserScan, IN_TOPIC, self.scan_cb, scan_qos)
+        self.warned = False
         self.get_logger().info(
-            "scan_restamp: %s stamped to latest %s time -> %s" % (IN_TOPIC, ODOM_TOPIC, OUT_TOPIC))
-    def odom_cb(self, msg):
-        self.last_odom = msg.header.stamp
+            "scan_restamp: %s stamped to latest %s->%s TF time -> %s"
+            % (IN_TOPIC, ODOM_FRAME, BASE_FRAME, OUT_TOPIC))
     def scan_cb(self, msg):
-        if self.last_odom is None:
-            return                       # wait until we have an odom time
-        msg.header.stamp = self.last_odom
+        try:
+            t = self.tf_buffer.lookup_transform(ODOM_FRAME, BASE_FRAME, rclpy.time.Time())
+        except Exception as e:
+            if not self.warned:
+                self.get_logger().warn("waiting for %s->%s TF: %s" % (ODOM_FRAME, BASE_FRAME, e))
+                self.warned = True
+            return
+        msg.header.stamp = t.header.stamp     # exact time of a real odom->base TF
         self.pub.publish(msg)
 
 rclpy.init()
@@ -170,10 +176,9 @@ def generate_launch_description():
 
     # Scan re-stamp relay (only when restamp:=true). When on, AMCL reads the
     # restamped topic instead of the raw scan.
-    restamp_out  = ['/', ns, '/scan_restamped']
-    restamp_odom = ['/', ns, '/odom']
+    restamp_out = ['/', ns, '/scan_restamped']
     scan_restamp = ExecuteProcess(
-        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out, restamp_odom],
+        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out, odom_frame, base_frame],
         output='screen',
         condition=IfCondition(restamp),
     )
