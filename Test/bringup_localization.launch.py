@@ -93,9 +93,9 @@ def generate_launch_description():
         DeclareLaunchArgument('namespace', default_value='T8'),
         DeclareLaunchArgument(
             'map', default_value=os.path.expanduser('~/Desktop/lab_map.yaml')),
-        # Default true: the bundled clock_bridge supplies /clock from the robot's
-        # timestamps, so all nodes here run on the robot's clock (fixes skew).
-        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        # Clocks measured roughly synced -> real time. Only flip to true (and
+        # re-enable clock_bridge in the return list) if you confirm a real skew.
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('init_x',   default_value='0.0'),
         DeclareLaunchArgument('init_y',   default_value='0.0'),
         DeclareLaunchArgument('init_yaw', default_value='0.0'),
@@ -150,4 +150,6 @@ def generate_launch_description():
         }],
     )
 
-    return LaunchDescription(args + [clock_bridge, map_server, amcl, lifecycle_manager])
+    # clock_bridge disabled — clocks measured ~synced. Re-add it to this list
+    # (and set use_sim_time:=true) only if a real skew is confirmed.
+    return LaunchDescription(args + [map_server, amcl, lifecycle_manager])
