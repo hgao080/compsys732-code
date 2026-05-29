@@ -49,8 +49,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, CompressedImage
 from nav_msgs.msg import Odometry
+from cv_bridge import CvBridge
 import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
@@ -113,12 +114,31 @@ FRONT_ARC_DEG  = 30           # degrees either side of forward for the emergency
 SHOW_VIS = True               # cv2 debug window (needs a display); set False if headless
 VIS_SCALE = 4                 # pixels per planning cell in the debug window
 
+# ── Camera / cube detection ────────────────────────────────────────────────────
+CAMERA_TOPIC         = f'{NAMESPACE}/oakd/rgb/image_raw/compressed'
+RED_LOW1             = np.array([0,   95,  95])
+RED_HIGH1            = np.array([8,  255, 255])
+RED_LOW2             = np.array([177, 95,  95])
+RED_HIGH2            = np.array([180, 255, 255])
+MIN_PIXELS_CENTRE    = 8500
+CENTRE_TOLERANCE_PX  = 15
+CENTRE_SPIN_KP       = 0.3
+CENTRE_TIMEOUT_TICKS = 100
+CAPTURE_TICKS        = 50
+SCAN_SPIN_REVS       = 1.0
+ORIGIN_THRESHOLD     = 0.25
+SNAPSHOT_PATH        = os.path.expanduser('~/detection_snapshot.jpg')
+
 # ── States ────────────────────────────────────────────────────────────────────
-WAIT_FOR_POSE = 'WAIT_FOR_POSE'
-NAVIGATE      = 'NAVIGATE'
-RECOVERY      = 'RECOVERY'
-GOAL_REACHED  = 'GOAL_REACHED'
-GIVE_UP       = 'GIVE_UP'
+WAIT_FOR_POSE  = 'WAIT_FOR_POSE'
+NAVIGATE       = 'NAVIGATE'
+RECOVERY       = 'RECOVERY'
+SCAN_SPIN      = 'SCAN_SPIN'
+CENTRE_ON_CUBE = 'CENTRE_ON_CUBE'
+CAPTURE        = 'CAPTURE'
+RETURNING      = 'RETURNING'
+GIVE_UP        = 'GIVE_UP'
+DONE           = 'DONE'
 
 
 # ── Map Loading ─────────────────────────────────────────────────────────────--
@@ -218,13 +238,28 @@ class AStarNav(Node):
         self.need_replan = True
         self.recovery_ticks = 0
         self.recovery_count = 0
+        self.active_goal = (GOAL_X, GOAL_Y)
         self.state = WAIT_FOR_POSE
         self.start_time = time.time()
         self.done_logged = False
 
+        # ── Camera / detection state ──
+        self.bridge          = CvBridge()
+        self.cube_cx         = None
+        self.image_width     = None
+        self.latest_img      = None
+        self.red_pixels      = 0
+        self.centre_ticks    = 0
+        self.capture_ticks   = 0
+        self.spin_ticks      = 0
+        self.cube_world_pos  = None
+        self.photo_robot_pos = None
+        self.mission_logged  = False
+
         # ── ROS interfaces ──
         self.cmd_pub = self.create_publisher(Twist, CMD_VEL, 10)
         self.create_subscription(LaserScan, SCAN_TOPIC, self.scan_callback, 10)
+        self.create_subscription(CompressedImage, CAMERA_TOPIC, self.image_callback, 10)
 
         if POSE_SOURCE == 'amcl':
             self.tf_buffer = tf2_ros.Buffer()
@@ -260,7 +295,8 @@ class AStarNav(Node):
         return 0 <= row < self.H and 0 <= col < self.W
 
     def dist_to_goal(self):
-        return math.hypot(GOAL_X - self.current_x, GOAL_Y - self.current_y)
+        gx, gy = self.active_goal
+        return math.hypot(gx - self.current_x, gy - self.current_y)
 
     # ── AMCL initial pose ────────────────────────────────────────────────────
     def _seed_initial_pose(self):
@@ -330,6 +366,24 @@ class AStarNav(Node):
         free = ~self.occupied[r_inb, c_inb]
         self.obstacle_grid[r_inb[free], c_inb[free]] = OBSTACLE_HIT
         self.have_scan = True
+
+    def image_callback(self, msg):
+        img = self.bridge.compressed_imgmsg_to_cv2(msg, 'bgr8')
+        self.image_width = img.shape[1]
+        self.latest_img  = img
+        hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.bitwise_or(
+            cv2.inRange(hsv, RED_LOW1, RED_HIGH1),
+            cv2.inRange(hsv, RED_LOW2, RED_HIGH2))
+        self.red_pixels = cv2.countNonZero(mask)
+        M = cv2.moments(mask)
+        self.cube_cx = int(M['m10'] / M['m00']) if M['m00'] > 0 else None
+        overlay = img.copy()
+        overlay[mask > 0] = [0, 0, 255]
+        cv2.putText(overlay, f'Red: {self.red_pixels}  state: {self.state}',
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.imshow('Detection', overlay)
+        cv2.waitKey(1)
 
     # ── Build inflated cost grid ───────────────────────────────────────────--
     def _build_blocked(self):
@@ -453,7 +507,7 @@ class AStarNav(Node):
     def replan(self):
         self.blocked = self._build_blocked()
         start = self.world_to_cell(self.current_x, self.current_y)
-        goal = self.world_to_cell(GOAL_X, GOAL_Y)
+        goal = self.world_to_cell(*self.active_goal)
         self.last_plan_time = time.time()
         self.need_replan = False
 
@@ -466,7 +520,7 @@ class AStarNav(Node):
             return False
         if not self.in_bounds(*goal):
             self.get_logger().error(
-                f'Goal cell {goal} OFF-MAP — check GOAL_X/GOAL_Y vs map origin.')
+                f'Goal cell {goal} OFF-MAP — check active_goal vs map origin.')
             self.path = []
             return False
 
@@ -553,6 +607,15 @@ class AStarNav(Node):
         if POSE_SOURCE == 'amcl':
             self.update_pose_from_tf()
 
+        # Detection interrupt: cube seen during navigation or scan spin
+        if (self.state in (NAVIGATE, SCAN_SPIN)
+                and self.red_pixels >= MIN_PIXELS_CENTRE):
+            self.cmd_pub.publish(Twist())
+            self.centre_ticks = 0
+            self.state = CENTRE_ON_CUBE
+            self.get_logger().info(
+                f'Red cube detected ({self.red_pixels} px) → CENTRE_ON_CUBE')
+
         if self.state == WAIT_FOR_POSE:
             if self.pose_ok and self.have_scan:
                 self.state = NAVIGATE
@@ -561,36 +624,38 @@ class AStarNav(Node):
             else:
                 self.cmd_pub.publish(Twist())
                 self._wait_log += 1
-                if self._wait_log % 20 == 0:   # every ~2 s
+                if self._wait_log % 20 == 0:
                     self.get_logger().warn(
                         f'WAIT_FOR_POSE: pose_ok={self.pose_ok} have_scan={self.have_scan} '
                         f'tf({MAP_FRAME}->{BASE_FRAME}) err={self.tf_err or "none"}')
 
         elif self.state == NAVIGATE:
             if self.dist_to_goal() < GOAL_TOLERANCE:
-                self.state = GOAL_REACHED
                 self.cmd_pub.publish(Twist())
+                self.spin_ticks = int(SCAN_SPIN_REVS * 2 * math.pi / (MAX_TURN * 0.1))
+                self.state = SCAN_SPIN
+                self.get_logger().info('Goal reached — starting 360 scan spin')
             else:
-                # Refresh the obstacle grid view, then decide if we must replan.
-                self.blocked = self._build_blocked()
-                due = (time.time() - self.last_plan_time) > REPLAN_PERIOD_S
-                if self.need_replan or due or not self.path or self.path_is_blocked():
-                    ok = self.replan()
-                    if not ok:
-                        self.recovery_count += 1
-                        if self.recovery_count >= MAX_RECOVERIES:
-                            self.state = GIVE_UP
-                        else:
-                            self.state = RECOVERY
-                            self.recovery_ticks = 0
-                        self.cmd_pub.publish(Twist())
-                        self._maybe_show()
-                        return
-                    self.recovery_count = 0
-                self.follow_path()
+                self._do_navigate()
+
+        elif self.state == SCAN_SPIN:
+            self.do_scan_spin()
+
+        elif self.state == CENTRE_ON_CUBE:
+            self.do_centre_on_cube()
+
+        elif self.state == CAPTURE:
+            self.do_capture()
+
+        elif self.state == RETURNING:
+            if self.dist_to_goal() < ORIGIN_THRESHOLD:
+                self.cmd_pub.publish(Twist())
+                self.state = DONE
+                self.get_logger().info('HOME — mission complete')
+            else:
+                self._do_navigate()
 
         elif self.state == RECOVERY:
-            # Back up briefly + rotate to expose new free space, then retry.
             msg = Twist()
             if self.recovery_ticks < 8 and self.front_min > SAFE_STOP_DIST:
                 msg.linear.x = -0.06
@@ -599,16 +664,14 @@ class AStarNav(Node):
             self.cmd_pub.publish(msg)
             self.recovery_ticks += 1
             if self.recovery_ticks >= 20:
-                self.state = NAVIGATE
+                self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
                 self.need_replan = True
 
-        elif self.state == GOAL_REACHED:
+        elif self.state == DONE:
             self.cmd_pub.publish(Twist())
-            if not self.done_logged:
-                self.done_logged = True
-                dt = time.time() - self.start_time
-                self.get_logger().info(
-                    f'GOAL REACHED ({GOAL_X:.2f},{GOAL_Y:.2f}) in {dt:.1f}s — done')
+            if not self.mission_logged:
+                self.mission_logged = True
+                self.log_mission_summary()
 
         elif self.state == GIVE_UP:
             self.cmd_pub.publish(Twist())
@@ -617,6 +680,100 @@ class AStarNav(Node):
                 self.get_logger().error('No path after repeated attempts — giving up.')
 
         self._maybe_show()
+
+    def _do_navigate(self):
+        """Shared A* navigation logic used by both NAVIGATE and RETURNING."""
+        self.blocked = self._build_blocked()
+        due = (time.time() - self.last_plan_time) > REPLAN_PERIOD_S
+        if self.need_replan or due or not self.path or self.path_is_blocked():
+            ok = self.replan()
+            if not ok:
+                self.recovery_count += 1
+                if self.recovery_count >= MAX_RECOVERIES:
+                    self.state = GIVE_UP
+                else:
+                    self.state = RECOVERY
+                    self.recovery_ticks = 0
+                self.cmd_pub.publish(Twist())
+                self._maybe_show()
+                return
+            self.recovery_count = 0
+        self.follow_path()
+
+    def do_scan_spin(self):
+        """Rotate 360° at goal looking for the cube."""
+        self.spin_ticks -= 1
+        if self.spin_ticks <= 0:
+            self.get_logger().info('Scan spin done — no cube found, returning home')
+            self._begin_return()
+            return
+        msg = Twist()
+        msg.angular.z = MAX_TURN
+        self.cmd_pub.publish(msg)
+
+    def do_centre_on_cube(self):
+        """Spin to centre the cube in the image frame."""
+        if self.cube_cx is None or self.image_width is None:
+            self.cmd_pub.publish(Twist())
+            return
+        error = self.cube_cx - self.image_width / 2
+        self.centre_ticks += 1
+        if abs(error) <= CENTRE_TOLERANCE_PX or self.centre_ticks >= CENTRE_TIMEOUT_TICKS:
+            self.capture_ticks = 0
+            self.state = CAPTURE
+            reason = 'timeout' if self.centre_ticks >= CENTRE_TIMEOUT_TICKS else f'{error:.0f}px'
+            self.get_logger().info(f'Cube centred ({reason}) → CAPTURE')
+            return
+        msg = Twist()
+        msg.angular.z = -CENTRE_SPIN_KP * (error / (self.image_width / 2))
+        self.cmd_pub.publish(msg)
+
+    def do_capture(self):
+        """Stop, snap photo, log cube world position, then return home."""
+        self.cmd_pub.publish(Twist())
+        self.capture_ticks += 1
+        if self.capture_ticks == CAPTURE_TICKS // 2:
+            x, y, yaw = self.current_x, self.current_y, self.current_yaw
+            self.photo_robot_pos = (x, y)
+            self.get_logger().info(f'[REPORT] Cube at robot pos ({x:.3f}, {y:.3f}) m')
+            if self.latest_img is not None:
+                cv2.imwrite(SNAPSHOT_PATH, self.latest_img)
+                self.get_logger().info(f'Snapshot saved → {SNAPSHOT_PATH}')
+            if self.front_min != float('inf'):
+                self.cube_world_pos = (
+                    x + self.front_min * math.cos(yaw),
+                    y + self.front_min * math.sin(yaw))
+                self.get_logger().info(
+                    f'[REPORT] Cube world pos ({self.cube_world_pos[0]:.3f}, '
+                    f'{self.cube_world_pos[1]:.3f}) m')
+        if self.capture_ticks >= CAPTURE_TICKS:
+            self._begin_return()
+
+    def _begin_return(self):
+        self.active_goal = (0.0, 0.0)
+        self.path = []
+        self.need_replan = True
+        self.recovery_count = 0
+        self.state = RETURNING
+        self.get_logger().info('RETURNING to origin (0, 0)')
+
+    def log_mission_summary(self):
+        elapsed = time.time() - self.start_time
+        mins, secs = divmod(elapsed, 60)
+        self.get_logger().info('=' * 55)
+        self.get_logger().info('[MISSION SUMMARY]')
+        self.get_logger().info(f'  Duration       : {int(mins)}m {secs:.1f}s')
+        if self.photo_robot_pos:
+            self.get_logger().info(
+                f'  Robot at photo : ({self.photo_robot_pos[0]:.3f}, {self.photo_robot_pos[1]:.3f}) m')
+        else:
+            self.get_logger().info('  Robot at photo : no detection')
+        if self.cube_world_pos:
+            self.get_logger().info(
+                f'  Cube world pos : ({self.cube_world_pos[0]:.3f}, {self.cube_world_pos[1]:.3f}) m')
+        else:
+            self.get_logger().info('  Cube world pos : unknown')
+        self.get_logger().info('=' * 55)
 
     # ── Debug visualisation ────────────────────────────────────────────────--
     def _maybe_show(self):
@@ -633,7 +790,7 @@ class AStarNav(Node):
             if self.in_bounds(r, c):
                 img[r, c] = (0, 200, 0)
 
-        gr, gc = self.world_to_cell(GOAL_X, GOAL_Y)                # goal = blue dot
+        gr, gc = self.world_to_cell(*self.active_goal)              # goal = blue dot
         rr, rc = self.world_to_cell(self.current_x, self.current_y)
         disp = np.flipud(img)                                      # back to y-down for display
         disp = cv2.resize(disp, (self.W * VIS_SCALE, self.H * VIS_SCALE),
