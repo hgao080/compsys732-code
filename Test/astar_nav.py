@@ -47,6 +47,7 @@ import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
@@ -71,6 +72,7 @@ POSE_SOURCE = 'amcl'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom onl
 SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for 'amcl')
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
+USE_SIM_TIME = True       # match localization launch (scan-clock bridge). False after robot clock synced.
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
 GOAL_X, GOAL_Y  = 0.322, -2.56    # ← read these off your map (metres, map frame)
@@ -171,7 +173,9 @@ def coarsen(mask, f):
 class AStarNav(Node):
 
     def __init__(self):
-        super().__init__('astar_nav')
+        super().__init__(
+            'astar_nav',
+            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, USE_SIM_TIME)])
 
         # ── Load + prepare the map ──
         occ, unk, res0, origin = load_map(MAP_YAML_PATH)

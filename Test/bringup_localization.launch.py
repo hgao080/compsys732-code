@@ -136,7 +136,9 @@ def generate_launch_description():
             'map', default_value=os.path.expanduser('~/Desktop/lab_map.yaml')),
         # Clocks measured roughly synced -> real time. Only flip to true (and
         # re-enable clock_bridge in the return list) if you confirm a real skew.
-        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        # Default true: scan-clock bridge puts AMCL on the robot's clock (raw
+        # scan, restamp stays false). Set false after the robot clock is synced.
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
         # restamp:=true -> run the scan re-stamp relay and point AMCL at it.
         # Most reliable clock-offset workaround. Keep use_sim_time:=false with it.
         DeclareLaunchArgument('restamp', default_value='false'),
