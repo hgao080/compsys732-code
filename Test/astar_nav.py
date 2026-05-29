@@ -393,18 +393,54 @@ class AStarNav(Node):
                     heapq.heappush(open_heap, (ng + h(nr, nc), ng, (nr, nc)))
         return None
 
+    def _diag(self, start, goal, sfree, gfree):
+        """Log why a plan is (un)reachable: grid composition + endpoint status."""
+        total = self.H * self.W
+        occ = int(self.occupied.sum())
+        unk = int(self.unknown.sum())
+        blk = int(self.blocked.sum())
+        dyn = int((self.obstacle_grid >= OBSTACLE_THRESH).sum())
+        self.get_logger().warn(
+            f'PLAN DIAG | grid {self.W}x{self.H} '
+            f'occ={100*occ/total:.0f}% unknown={100*unk/total:.0f}% '
+            f'blocked(after inflate+dyn)={100*blk/total:.0f}% live_obs_cells={dyn}')
+        self.get_logger().warn(
+            f'  start cell={start} in_bounds={self.in_bounds(*start)} '
+            f'blocked={self.in_bounds(*start) and bool(self.blocked[start])} '
+            f'-> nearest_free={sfree}  pose=({self.current_x:.2f},{self.current_y:.2f})')
+        self.get_logger().warn(
+            f'  goal  cell={goal} in_bounds={self.in_bounds(*goal)} '
+            f'blocked={self.in_bounds(*goal) and bool(self.blocked[goal])} '
+            f'-> nearest_free={gfree}  goal=({GOAL_X:.2f},{GOAL_Y:.2f})')
+
     def replan(self):
         self.blocked = self._build_blocked()
         start = self.world_to_cell(self.current_x, self.current_y)
         goal = self.world_to_cell(GOAL_X, GOAL_Y)
-        if not self.in_bounds(*goal):
-            self.get_logger().error('Goal is outside the map bounds — check GOAL_X/GOAL_Y.')
-            return False
-        path = self.astar(start, goal)
         self.last_plan_time = time.time()
         self.need_replan = False
+
+        if not self.in_bounds(*start):
+            self.get_logger().error(
+                f'Start cell {start} OFF-MAP — pose wrong? '
+                f'pose=({self.current_x:.2f},{self.current_y:.2f}) '
+                f'origin=({self.ox:.2f},{self.oy:.2f}) size={self.W}x{self.H}')
+            self.path = []
+            return False
+        if not self.in_bounds(*goal):
+            self.get_logger().error(
+                f'Goal cell {goal} OFF-MAP — check GOAL_X/GOAL_Y vs map origin.')
+            self.path = []
+            return False
+
+        # Relocate BOTH endpoints off blocked cells (was goal-only before).
+        sfree = self._nearest_free(*start)
+        gfree = self._nearest_free(*goal)
+
+        path = self.astar(sfree, gfree) if (sfree and gfree) else None
         if path is None or len(path) < 1:
             self.get_logger().warn('A* found no path to goal.')
+            self._diag(start, goal, sfree, gfree)
             self.path = []
             return False
         self.path = path
