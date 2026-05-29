@@ -16,7 +16,7 @@ CUBE_RANGE_ARC_DEG = 10  # degrees either side of forward for cube range estimat
 FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 
 # ── Wall Follow Config ────────────────────────────────────────────────────────
-WALL_LOST_THRESHOLD    = 0.4  # metres — right wall distance to declare wall lost
+WALL_LOST_THRESHOLD    = 0.38  # metres — right wall distance to declare wall lost
 WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
 WALL_LOST_TURN         = 0.4   # rad/s — turn speed when reacquiring right wall (was 0.8)
 WALL_TARGET_DIST       = 0.28  # metres — desired distance to right wall
@@ -30,9 +30,10 @@ WALL_AVG_HALF_DEG      = 3     # half-arc width used to average each reading
 FIND_WALL_WAIT_TICKS = 10   # ticks to hold still on startup (1 s at 10 Hz)
 FIND_WALL_SPIN_TICKS = 52   # ticks for 180° spin (0.6 rad/s × 52 × 0.1 s ≈ π)
 
-# ── Sweep Config ───────────────────────────────────────────────────────────────
-SWEEP_TOTAL_TICKS = 157   # ticks for full 360° sweep (0.4 rad/s × 157 × 0.1 s ≈ 2π)
-SWEEP_TURN_SPEED  = 0.4   # rad/s — rightward sweep speed
+# ── Peek Config ───────────────────────────────────────────────────────────────
+PEEK_TURN_SPEED    = 0.5   # rad/s — rotation speed during peek
+PEEK_YAW_TOLERANCE = 0.08  # rad — close enough to target yaw (≈4.6°)
+PEEK_CHECK_TICKS   = 8     # ticks to hold still while camera settles (~0.8 s)
 
 # ── Centre-on-Cube Config ────────────────────────────────────────────────────
 CENTRE_TOLERANCE_PX     = 15   # pixels either side of centre = "aligned"
@@ -58,7 +59,7 @@ RETURN_NEAR_ORIGIN     = 0.5   # metres — switch from wall-follow to bearing c
 # ── States ────────────────────────────────────────────────────────────────────
 FIND_WALL      = 'FIND_WALL'
 WALL_FOLLOW    = 'WALL_FOLLOW'
-SWEEP          = 'SWEEP'
+PEEK_RIGHT     = 'PEEK_RIGHT'
 CENTRE_ON_CUBE = 'CENTRE_ON_CUBE'
 CAPTURE        = 'CAPTURE'
 RETURN_ORIGIN  = 'RETURN_ORIGIN'
@@ -116,10 +117,12 @@ class SearchAndNavigate(Node):
         self.centre_ticks     = 0   # ticks spent in CENTRE_ON_CUBE
         self.red_pixels       = 0
 
-        # Sweep state
-        self.sweep_flag            = False
-        self.sweep_ticks           = 0
-        self.sweep_pixel_threshold = MIN_PIXELS_SWEEP_FLAG
+        # Peek state
+        self.peek_yaw_start   = 0.0            # robot yaw when peek began
+        self.peek_phase       = 'rotating_right'  # 'rotating_right'|'checking'|'rotating_back'
+        self.peek_check_ticks = 0              # ticks elapsed in 'checking' phase
+        self.peek_done        = False          # True after peek at current obstacle; cleared when obstacle clears
+        self.peek_enabled     = True           # disabled once RETURN_ORIGIN begins
 
         # State machine
         self.state = FIND_WALL
@@ -162,23 +165,24 @@ class SearchAndNavigate(Node):
         rp = self.wall_perp   # range ≈ perpendicular to wall
         rd = self.wall_diag   # range at WALL_DIAG_ANGLE_DEG (ahead-right)
 
-        if rp >= WALL_LOST_THRESHOLD or rd == float('inf'):
+        # rp alone determines wall-lost: if wall is gone, no useful control possible
+        if rp >= WALL_LOST_THRESHOLD:
             return float('inf'), 0.0
 
         # Body-frame angles from forward (x-axis): 0 = forward, −90° = directly right
-        phi_p = math.radians(WALL_PERP_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −85°
-        phi_d = math.radians(WALL_DIAG_ANGLE_DEG - FRONT_BEARING_DEG)  # ≈ −45°
+        phi_p = math.radians(WALL_PERP_ANGLE_DEG - FRONT_BEARING_DEG)  # = −90°
+        phi_d = math.radians(WALL_DIAG_ANGLE_DEG - FRONT_BEARING_DEG)  # = −60°
 
         # Perpendicular distance (exact when phi_p = −90°, rp = d_perp)
         d_perp = abs(rp * math.sin(phi_p))
 
-        # Corner sanity check: diagonal ray sees around a corner when rd is much
-        # larger than the geometrically expected value for a parallel wall.
-        # Expected: rd_parallel = d_perp / |sin(phi_d)|
+        # rd unavailable or sees past a corner → distance-only control (psi = 0)
+        if rd == float('inf'):
+            return d_perp - WALL_TARGET_DIST, 0.0
+
         rd_expected = d_perp / abs(math.sin(phi_d))
         if rd > rd_expected * 1.5:
-            # Diagonal is seeing past a corner — suppress heading correction,
-            # use distance-only control to avoid premature turning.
+            # Diagonal is seeing past a corner — suppress heading correction
             return d_perp - WALL_TARGET_DIST, 0.0
 
         # Wall direction vector: two wall points in body frame
@@ -205,7 +209,7 @@ class SearchAndNavigate(Node):
             return min(vals) if vals else float('inf')
 
         self.nearest_front = arc_min(front_i - half_a, front_i + half_a)
-        self.nearest_right = arc_min(0, 5)
+        self.nearest_right = arc_min(0, front_i - half_a) 
         cube_half_a = int(round(math.radians(CUBE_RANGE_ARC_DEG) / inc))
         self.nearest_cube_front = arc_min(front_i - cube_half_a, front_i + cube_half_a)
 
@@ -247,12 +251,7 @@ class SearchAndNavigate(Node):
         cv2.imshow('Detection', overlay)
         cv2.waitKey(1)
 
-        # Arm sweep if cube glimpsed but not yet centrable
-        if self.state == WALL_FOLLOW and pixels >= self.sweep_pixel_threshold:
-            self.sweep_flag = True
-
-        # Trigger centering when cube first detected during wall search
-        if self.state == WALL_FOLLOW and pixels >= MIN_PIXELS_CENTRE:
+        if self.state in (WALL_FOLLOW, PEEK_RIGHT) and pixels >= MIN_PIXELS_CENTRE:
             self.state = CENTRE_ON_CUBE
             self.centre_ticks = 0
             self.get_logger().info(
@@ -286,8 +285,8 @@ class SearchAndNavigate(Node):
             self.do_find_wall()
         elif self.state == WALL_FOLLOW:
             self.do_wall_follow()
-        elif self.state == SWEEP:
-            self.do_sweep()
+        elif self.state == PEEK_RIGHT:
+            self.do_peek_right()
         elif self.state == CENTRE_ON_CUBE:
             self.do_centre_on_cube()
         elif self.state == CAPTURE:
@@ -340,18 +339,23 @@ class SearchAndNavigate(Node):
         msg = Twist()
 
         if self.nearest_front < AVOID_DISTANCE:
-            if self.sweep_flag:
-                self.sweep_ticks = 0
-                self.state = SWEEP
+            if self.peek_enabled and not self.peek_done:
+                # First encounter with this obstacle — peek right before turning left
+                self.peek_yaw_start   = self.current_yaw
+                self.peek_phase       = 'rotating_right'
+                self.peek_check_ticks = 0
+                self.state = PEEK_RIGHT
                 self.get_logger().info(
-                    'Front obstacle + sweep flag — switching → SWEEP')
+                    f'Front obstacle — peeking right from yaw={math.degrees(self.current_yaw):.1f}°')
                 return
+            # Peek already done (or disabled in return phase) → turn left as normal
             msg.linear.x  = 0.0
             msg.angular.z = TURN_SPEED
             self.get_logger().warn(
                 f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
         else:
+            self.peek_done = False   # obstacle cleared — ready to peek at the next one
             dist_err, heading_err = self._wall_errors()
 
             if dist_err == float('inf'):
@@ -373,32 +377,61 @@ class SearchAndNavigate(Node):
 
         self.publisher.publish(msg)
 
-    def do_sweep(self):
-        """Rotate 360° in place looking for cube; transition to CENTRE_ON_CUBE if found."""
-        if self.red_pixels >= MIN_PIXELS_CENTRE:
-            self.centre_ticks    = 0
-            self.lost_cube_ticks = 0
-            self.state = CENTRE_ON_CUBE
-            self.get_logger().info(
-                f'Sweep found cube ({self.red_pixels} px) — switching → CENTRE_ON_CUBE')
-            return
+    def do_peek_right(self):
+        """90° right peek at a front obstacle to check for red cube.
 
-        self.sweep_ticks += 1
-        if self.sweep_ticks >= SWEEP_TOTAL_TICKS:
-            self.sweep_pixel_threshold += 500
-            self.sweep_flag  = False
-            self.sweep_ticks = 0
-            self.state = WALL_FOLLOW
-            self.get_logger().info(
-                f'Sweep complete, no cube — resuming WALL_FOLLOW '
-                f'(sweep threshold → {self.sweep_pixel_threshold} px)')
-            return
+        Phases:
+          rotating_right : rotate CW until yaw has decreased by π/2 from peek_yaw_start
+          checking       : hold still for PEEK_CHECK_TICKS; evaluate red_pixels
+                           → cube found: CENTRE_ON_CUBE
+                           → no cube:    rotating_back
+          rotating_back  : rotate CCW back to peek_yaw_start → WALL_FOLLOW (peek_done=True)
+
+        image_callback also monitors PEEK_RIGHT state and can fire CENTRE_ON_CUBE
+        transition early if pixels exceed threshold while rotating.
+        """
+        def norm(a):
+            return math.atan2(math.sin(a), math.cos(a))
 
         msg = Twist()
-        msg.angular.z = -SWEEP_TURN_SPEED
+
+        if self.peek_phase == 'rotating_right':
+            target = norm(self.peek_yaw_start - math.pi / 2)
+            err    = norm(self.current_yaw - target)
+            if abs(err) < PEEK_YAW_TOLERANCE:
+                self.peek_phase       = 'checking'
+                self.peek_check_ticks = 0
+                self.get_logger().info('Peek: facing right — checking camera')
+            else:
+                msg.angular.z = -PEEK_TURN_SPEED   # rotate CW (right)
+
+        elif self.peek_phase == 'checking':
+            self.peek_check_ticks += 1
+            self.get_logger().info(
+                f'Peek check {self.peek_check_ticks}/{PEEK_CHECK_TICKS} px={self.red_pixels}')
+            if self.peek_check_ticks >= PEEK_CHECK_TICKS:
+                if self.red_pixels >= MIN_PIXELS_CENTRE:
+                    self.centre_ticks    = 0
+                    self.lost_cube_ticks = 0
+                    self.state = CENTRE_ON_CUBE
+                    self.get_logger().info(
+                        f'Peek: cube found ({self.red_pixels} px) → CENTRE_ON_CUBE')
+                    return
+                self.peek_phase = 'rotating_back'
+                self.get_logger().info(
+                    f'Peek: no cube ({self.red_pixels} px) — rotating back')
+
+        elif self.peek_phase == 'rotating_back':
+            err = norm(self.current_yaw - self.peek_yaw_start)
+            if abs(err) < PEEK_YAW_TOLERANCE:
+                self.peek_done  = True
+                self.peek_phase = 'rotating_right'   # reset for next obstacle
+                self.state      = WALL_FOLLOW
+                self.get_logger().info('Peek: back to original heading — resuming WALL_FOLLOW')
+                return
+            msg.angular.z = +PEEK_TURN_SPEED   # rotate CCW (left) back to start
+
         self.publisher.publish(msg)
-        self.get_logger().info(
-            f'Sweep tick {self.sweep_ticks}/{SWEEP_TOTAL_TICKS} px={self.red_pixels}')
 
     def do_centre_on_cube(self):
         """Spin in place until the red cube centroid is in the centre of the image."""
@@ -450,7 +483,7 @@ class SearchAndNavigate(Node):
             f'pos=({self.current_x:.2f}, {self.current_y:.2f})')
 
         if self.capture_ticks >= CAPTURE_TICKS:
-            self.sweep_flag = False
+            self.peek_enabled = False   # no more peeking during return journey
             self.state = RETURN_ORIGIN
             self.get_logger().info(
                 f'Capture complete. Starting return from '
