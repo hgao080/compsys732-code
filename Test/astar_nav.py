@@ -317,6 +317,7 @@ class AStarNav(Node):
         self.front_min = float(ranges[front_mask].min()) if front_mask.any() else float('inf')
 
         # Project valid returns into the map frame -> dynamic obstacle layer.
+        # Only mark cells that are free in the static map — avoids wall-bleed inflation.
         self.obstacle_grid *= OBSTACLE_DECAY
         r = ranges[valid]
         a = base_ang[valid] + self.current_yaw
@@ -325,7 +326,9 @@ class AStarNav(Node):
         cols = ((wx - self.ox) / self.pres).astype(np.int64)
         rows = ((wy - self.oy) / self.pres).astype(np.int64)
         inb = (rows >= 0) & (rows < self.H) & (cols >= 0) & (cols < self.W)
-        self.obstacle_grid[rows[inb], cols[inb]] = OBSTACLE_HIT
+        r_inb, c_inb = rows[inb], cols[inb]
+        free = ~self.occupied[r_inb, c_inb]
+        self.obstacle_grid[r_inb[free], c_inb[free]] = OBSTACLE_HIT
         self.have_scan = True
 
     # ── Build inflated cost grid ───────────────────────────────────────────--
@@ -482,12 +485,41 @@ class AStarNav(Node):
         return True
 
     def path_is_blocked(self):
-        """Cheap check: is any upcoming waypoint now blocked in the latest grid?"""
-        for (wx, wy) in self.path[self.path_idx:self.path_idx + 20]:
-            r, c = self.world_to_cell(wx, wy)
-            if self.in_bounds(r, c) and self.blocked[r, c]:
+        """Line-of-sight check from robot through upcoming waypoints.
+
+        Catches obstacles sitting between waypoint cells, not just on them.
+        """
+        if not self.path:
+            return False
+        prev = self.world_to_cell(self.current_x, self.current_y)
+        for (wx, wy) in self.path[self.path_idx:self.path_idx + 15]:
+            cur = self.world_to_cell(wx, wy)
+            if not self._line_clear(prev, cur):
                 return True
+            prev = cur
         return False
+
+    def _line_clear(self, a, b):
+        """Bresenham line between cells a and b; False if any cell is blocked."""
+        r0, c0 = a
+        r1, c1 = b
+        dr, dc = abs(r1 - r0), abs(c1 - c0)
+        sr, sc = (1 if r1 > r0 else -1), (1 if c1 > c0 else -1)
+        err = dr - dc
+        r, c = r0, c0
+        while True:
+            if self.in_bounds(r, c) and self.blocked[r, c]:
+                return False
+            if r == r1 and c == c1:
+                break
+            e2 = 2 * err
+            if e2 > -dc:
+                err -= dc
+                r += sr
+            if e2 < dr:
+                err += dr
+                c += sc
+        return True
 
     # ── Pure-pursuit follower ──────────────────────────────────────────────--
     def follow_path(self):
