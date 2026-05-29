@@ -123,7 +123,7 @@ class Restamp(Node):
         msg.header.stamp = t.header.stamp     # exact time of a real odom->base TF
         self.pub.publish(msg)
 
-rclpy.init()
+rclpy.init(args=sys.argv)   # accepts --ros-args tf remaps appended by the launch
 node = Restamp()
 try:
     rclpy.spin(node)
@@ -178,7 +178,10 @@ def generate_launch_description():
     # restamped topic instead of the raw scan.
     restamp_out = ['/', ns, '/scan_restamped']
     scan_restamp = ExecuteProcess(
-        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out, odom_frame, base_frame],
+        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out, odom_frame, base_frame,
+             '--ros-args',
+             '-r', ['/tf:=/', ns, '/tf'],
+             '-r', ['/tf_static:=/', ns, '/tf_static']],
         output='screen',
         condition=IfCondition(restamp),
     )
@@ -211,11 +214,12 @@ def generate_launch_description():
     amcl = Node(
         package='nav2_amcl', executable='amcl', name='amcl',
         namespace=ns, output='screen',
-        # Robot publishes its STATIC TF (base->rplidar etc.) to the namespaced
-        # /<ns>/tf_static, not global /tf_static. Point AMCL's static listener
-        # there so it can place the laser. /tf (dynamic odom->base + AMCL's own
-        # map->odom output) stays global, where the nav node reads it.
-        remappings=[('/tf_static', ['/', ns, '/tf_static'])],
+        # The robot publishes its ENTIRE TF tree (dynamic odom->base AND statics)
+        # to the namespaced /<ns>/tf and /<ns>/tf_static; global /tf is empty.
+        # Put AMCL fully on that tree: it reads odom->base + statics there and
+        # publishes map->odom there too. The nav node must read /<ns>/tf as well.
+        remappings=[('/tf', ['/', ns, '/tf']),
+                    ('/tf_static', ['/', ns, '/tf_static'])],
         parameters=[{
             'use_sim_time': use_sim,
             'global_frame_id': 'map',

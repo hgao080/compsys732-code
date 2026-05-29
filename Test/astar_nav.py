@@ -42,7 +42,7 @@ RUN
     python3 astar_nav.py
 """
 
-import os, math, time, heapq, yaml
+import os, sys, math, time, heapq, yaml
 import numpy as np
 import cv2
 import rclpy
@@ -73,6 +73,10 @@ SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for '
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
 USE_SIM_TIME = False      # restamp path uses real time. Only true if running the scan-clock bridge.
+# This robot publishes its whole TF tree on the namespaced /<ns>/tf(_static),
+# not global /tf. When True, the node remaps its TF listener there automatically
+# (no need for `--ros-args -r /tf:=...` on the command line).
+TF_ON_ROBOT_NAMESPACE = True
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
 GOAL_X, GOAL_Y  = 0.322, -2.56    # ← read these off your map (metres, map frame)
@@ -615,7 +619,13 @@ class AStarNav(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    cli = sys.argv if args is None else args
+    # Force the TF listener onto the robot's namespaced tree so no CLI -r needed.
+    if TF_ON_ROBOT_NAMESPACE and NAMESPACE:
+        cli = list(cli) + ['--ros-args',
+                           '-r', f'/tf:=/{NAMESPACE}/tf',
+                           '-r', f'/tf_static:=/{NAMESPACE}/tf_static']
+    rclpy.init(args=cli)
     node = AStarNav()
     try:
         rclpy.spin(node)
