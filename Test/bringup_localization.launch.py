@@ -199,6 +199,11 @@ def generate_launch_description():
     amcl = Node(
         package='nav2_amcl', executable='amcl', name='amcl',
         namespace=ns, output='screen',
+        # Robot publishes its STATIC TF (base->rplidar etc.) to the namespaced
+        # /<ns>/tf_static, not global /tf_static. Point AMCL's static listener
+        # there so it can place the laser. /tf (dynamic odom->base + AMCL's own
+        # map->odom output) stays global, where the nav node reads it.
+        remappings=[('/tf_static', ['/', ns, '/tf_static'])],
         parameters=[{
             'use_sim_time': use_sim,
             'global_frame_id': 'map',
