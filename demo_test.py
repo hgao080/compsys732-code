@@ -18,7 +18,8 @@ FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 # ── Wall Follow Config ────────────────────────────────────────────────────────
 WALL_LOST_THRESHOLD    = 0.38  # metres — right wall distance to declare wall lost
 WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
-WALL_LOST_TURN         = 0.4   # rad/s — turn speed when reacquiring right wall (was 0.8)
+WALL_LOST_TURN         = 0.5   # rad/s — turn speed when reacquiring right wall (was 0.8)
+WALL_LOST_AVOID_DISTANCE = 0.25  # metres — lower front obstacle threshold during wall-lost recovery
 WALL_TARGET_DIST       = 0.28  # metres — desired distance to right wall
 WALL_KD                = 1.2   # proportional gain — perpendicular distance error
 WALL_KH                = 1.0   # proportional gain — wall heading angle error (new)
@@ -335,8 +336,13 @@ class SearchAndNavigate(Node):
           WALL_KH × heading_err — keeps robot parallel to wall (ψ = 0)
         """
         msg = Twist()
+        dist_err, heading_err = self._wall_errors()
+        wall_lost = dist_err == float('inf')
 
-        if self.nearest_front < AVOID_DISTANCE:
+        # Use a tighter front threshold during wall-lost recovery to allow closer wall approach
+        front_threshold = WALL_LOST_AVOID_DISTANCE if wall_lost else AVOID_DISTANCE
+
+        if self.nearest_front < front_threshold:
             if self.peek_enabled and not self.peek_done:
                 # First encounter with this obstacle — peek right before turning left
                 self.peek_yaw_start   = self.current_yaw
@@ -352,27 +358,25 @@ class SearchAndNavigate(Node):
             self.get_logger().warn(
                 f'Front wall ({self.nearest_front:.2f} m) — turning LEFT')
 
-        else:
-            dist_err, heading_err = self._wall_errors()
+        elif wall_lost:
+            # Wall not visible — slow forward + curve right; lets robot find cylinder surface or corridor wall
+            msg.linear.x  = WALL_LOST_SPEED
+            msg.angular.z = -WALL_LOST_TURN
+            self.get_logger().info(
+                f'Right wall lost (perp={self.wall_perp:.2f} m) — curving RIGHT')
 
-            if dist_err == float('inf'):
-                # Wall not visible — slow forward + curve right; lets robot find cylinder surface or corridor wall
-                msg.linear.x  = WALL_LOST_SPEED
-                msg.angular.z = -WALL_LOST_TURN
-                self.get_logger().info(
-                    f'Right wall lost (perp={self.wall_perp:.2f} m) — curving RIGHT')
-            else:
-                # Wall properly acquired — safe to arm peek for the next obstacle
-                self.peek_done = False
-                # Dual-P: heading correction dominates alignment; distance keeps gap
-                msg.linear.x  = FORWARD_SPEED
-                msg.angular.z = WALL_KH * heading_err - WALL_KD * dist_err
-                self.get_logger().info(
-                    f'Wall follow | perp={self.wall_perp:.2f} m '
-                    f'dist_err={dist_err:+.3f} m '
-                    f'ψ={math.degrees(heading_err):+.1f}° '
-                    f'cmd_z={msg.angular.z:+.2f} '
-                    f'pos=({self.current_x:.2f},{self.current_y:.2f})')
+        else:
+            # Wall properly acquired — safe to arm peek for the next obstacle
+            self.peek_done = False
+            # Dual-P: heading correction dominates alignment; distance keeps gap
+            msg.linear.x  = FORWARD_SPEED
+            msg.angular.z = WALL_KH * heading_err - WALL_KD * dist_err
+            self.get_logger().info(
+                f'Wall follow | perp={self.wall_perp:.2f} m '
+                f'dist_err={dist_err:+.3f} m '
+                f'ψ={math.degrees(heading_err):+.1f}° '
+                f'cmd_z={msg.angular.z:+.2f} '
+                f'pos=({self.current_x:.2f},{self.current_y:.2f})')
 
         self.publisher.publish(msg)
 
