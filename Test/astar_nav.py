@@ -67,7 +67,7 @@ MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_map.yaml')  # ← saved map .y
 ALLOW_UNKNOWN = False     # treat unknown (-1) map cells as obstacles (safer = False)
 
 # ── Pose Source ───────────────────────────────────────────────────────────────
-POSE_SOURCE = 'odom'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom only)
+POSE_SOURCE = 'amcl'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom only)
 SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for 'amcl')
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
@@ -78,7 +78,7 @@ GOAL_TOLERANCE  = 0.18        # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 ROBOT_RADIUS     = 0.18       # TurtleBot4 ~0.17 m radius
-INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
+INFLATION_RADIUS = 0.15       # metres — obstacles grown by this for planning
 PLAN_RESOLUTION  = 0.05       # metres/cell for the planner (map is coarsened to this)
 REPLAN_PERIOD_S  = 1.0        # seconds — periodic replan cadence
 MAX_RECOVERIES   = 6          # consecutive plan failures before giving up
