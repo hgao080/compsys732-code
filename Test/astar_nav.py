@@ -72,7 +72,7 @@ POSE_SOURCE = 'amcl'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom onl
 SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for 'amcl')
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
-USE_SIM_TIME = True       # match localization launch (scan-clock bridge). False after robot clock synced.
+USE_SIM_TIME = False      # restamp path uses real time. Only true if running the scan-clock bridge.
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
 GOAL_X, GOAL_Y  = 0.322, -2.56    # ← read these off your map (metres, map frame)

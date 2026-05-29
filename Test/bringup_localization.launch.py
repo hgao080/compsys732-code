@@ -78,30 +78,43 @@ finally:
     rclpy.shutdown()
 '''
 
-# Scan re-stamp relay, embedded. argv[1]=in topic, argv[2]=out topic.
-# Rewrites each scan's header.stamp to now() and republishes, so the scan is
-# always "current" and AMCL's tf lookup at that time always succeeds. The most
-# reliable way to neutralise the clock offset. Only runs when restamp:=true.
+# Scan re-stamp relay, embedded. argv[1]=in scan, argv[2]=out scan, argv[3]=odom.
+# Root problem: the robot's odom (Create3) and scan (RPi) are on DIFFERENT clocks
+# (~1.4 s apart), so AMCL can never get the odom transform at the scan's time.
+# Fix: stamp each scan with the LATEST odom timestamp -> scan and odom now share
+# the odom clock, so AMCL's tf lookup always lands on a real odom transform.
+# Only runs when restamp:=true.
 RESTAMP_CODE = r'''
 import sys
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 
-IN_TOPIC  = sys.argv[1] if len(sys.argv) > 1 else "/T7/scan"
-OUT_TOPIC = sys.argv[2] if len(sys.argv) > 2 else "/T7/scan_restamped"
+IN_TOPIC   = sys.argv[1] if len(sys.argv) > 1 else "/T7/scan"
+OUT_TOPIC  = sys.argv[2] if len(sys.argv) > 2 else "/T7/scan_restamped"
+ODOM_TOPIC = sys.argv[3] if len(sys.argv) > 3 else "/T7/odom"
 
 class Restamp(Node):
     def __init__(self):
         super().__init__("scan_restamp")
-        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
-                         history=HistoryPolicy.KEEP_LAST, depth=10)
-        self.pub = self.create_publisher(LaserScan, OUT_TOPIC, qos)
-        self.create_subscription(LaserScan, IN_TOPIC, self.cb, qos)
-        self.get_logger().info("scan_restamp: %s -> %s (stamp=now)" % (IN_TOPIC, OUT_TOPIC))
-    def cb(self, msg):
-        msg.header.stamp = self.get_clock().now().to_msg()
+        scan_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                              history=HistoryPolicy.KEEP_LAST, depth=10)
+        odom_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                              history=HistoryPolicy.KEEP_LAST, depth=10)
+        self.last_odom = None
+        self.pub = self.create_publisher(LaserScan, OUT_TOPIC, scan_qos)
+        self.create_subscription(Odometry, ODOM_TOPIC, self.odom_cb, odom_qos)
+        self.create_subscription(LaserScan, IN_TOPIC, self.scan_cb, scan_qos)
+        self.get_logger().info(
+            "scan_restamp: %s stamped to latest %s time -> %s" % (IN_TOPIC, ODOM_TOPIC, OUT_TOPIC))
+    def odom_cb(self, msg):
+        self.last_odom = msg.header.stamp
+    def scan_cb(self, msg):
+        if self.last_odom is None:
+            return                       # wait until we have an odom time
+        msg.header.stamp = self.last_odom
         self.pub.publish(msg)
 
 rclpy.init()
@@ -136,12 +149,11 @@ def generate_launch_description():
             'map', default_value=os.path.expanduser('~/Desktop/lab_map.yaml')),
         # Clocks measured roughly synced -> real time. Only flip to true (and
         # re-enable clock_bridge in the return list) if you confirm a real skew.
-        # Default true: scan-clock bridge puts AMCL on the robot's clock (raw
-        # scan, restamp stays false). Set false after the robot clock is synced.
-        DeclareLaunchArgument('use_sim_time', default_value='true'),
-        # restamp:=true -> run the scan re-stamp relay and point AMCL at it.
-        # Most reliable clock-offset workaround. Keep use_sim_time:=false with it.
-        DeclareLaunchArgument('restamp', default_value='false'),
+        # Real time (the clock bridge alone can't fix an odom<->scan offset).
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        # Default true: re-stamp scans onto the odom clock (fixes the Create3<->RPi
+        # offset). This is the working path. Set false after the robot clock synced.
+        DeclareLaunchArgument('restamp', default_value='true'),
         DeclareLaunchArgument('init_x',   default_value='0.0'),
         DeclareLaunchArgument('init_y',   default_value='0.0'),
         DeclareLaunchArgument('init_yaw', default_value='0.0'),
@@ -158,9 +170,10 @@ def generate_launch_description():
 
     # Scan re-stamp relay (only when restamp:=true). When on, AMCL reads the
     # restamped topic instead of the raw scan.
-    restamp_out = ['/', ns, '/scan_restamped']
+    restamp_out  = ['/', ns, '/scan_restamped']
+    restamp_odom = ['/', ns, '/odom']
     scan_restamp = ExecuteProcess(
-        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out],
+        cmd=['python3', '-c', RESTAMP_CODE, scan_topic, restamp_out, restamp_odom],
         output='screen',
         condition=IfCondition(restamp),
     )
