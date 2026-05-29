@@ -63,7 +63,7 @@ MAP_FRAME   = 'map'
 BASE_FRAME  = f'{NAMESPACE}/base_link'
 
 # ── Map Config ────────────────────────────────────────────────────────────────
-MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_mapss.yaml')  # ← saved map .yaml
+MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_map.yaml')  # ← saved map .yaml
 ALLOW_UNKNOWN = False     # treat unknown (-1) map cells as obstacles (safer = False)
 
 # ── Pose Source ───────────────────────────────────────────────────────────────
@@ -394,16 +394,39 @@ class AStarNav(Node):
         return None
 
     def _diag(self, start, goal, sfree, gfree):
-        """Log why a plan is (un)reachable: grid composition + endpoint status."""
+        """Log why a plan is (un)reachable: grid composition + endpoint status.
+
+        Separates the inflation contribution from the live-LiDAR contribution,
+        and tests whether the static map alone (no dynamic layer) is connected.
+        """
         total = self.H * self.W
         occ = int(self.occupied.sum())
         unk = int(self.unknown.sum())
         blk = int(self.blocked.sum())
         dyn = int((self.obstacle_grid >= OBSTACLE_THRESH).sum())
+
+        # Static-only inflated grid (no dynamic LiDAR layer).
+        static_occ = self.occupied.copy()
+        if not ALLOW_UNKNOWN:
+            static_occ |= self.unknown
+        static_infl = cv2.dilate(static_occ.astype(np.uint8), self.kernel) > 0
+
+        # Is start<->goal connected on the static map alone?
+        saved = self.blocked
+        self.blocked = static_infl
+        sp = self.astar(self._nearest_free(*start), self._nearest_free(*goal)) \
+            if (sfree and gfree) else None
+        self.blocked = saved
+
         self.get_logger().warn(
             f'PLAN DIAG | grid {self.W}x{self.H} '
-            f'occ={100*occ/total:.0f}% unknown={100*unk/total:.0f}% '
-            f'blocked(after inflate+dyn)={100*blk/total:.0f}% live_obs_cells={dyn}')
+            f'occ_raw={100*occ/total:.0f}% unknown={100*unk/total:.0f}% '
+            f'static+inflate={100*int(static_infl.sum())/total:.0f}% '
+            f'static+inflate+dyn={100*blk/total:.0f}% live_obs_cells={dyn}')
+        self.get_logger().warn(
+            f'  STATIC-ONLY path exists={sp is not None} '
+            f'(if True, the live LiDAR layer is blocking — check pose/LIDAR_YAW_OFFSET; '
+            f'if False, inflation too big or map disconnected)')
         self.get_logger().warn(
             f'  start cell={start} in_bounds={self.in_bounds(*start)} '
             f'blocked={self.in_bounds(*start) and bool(self.blocked[start])} '
