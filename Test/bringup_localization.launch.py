@@ -185,6 +185,18 @@ def generate_launch_description():
     amcl_scan = PythonExpression(
         ["'scan_restamped' if '", restamp, "' == 'true' else 'scan'"])
 
+    # The robot's URDF statics use UN-namespaced frames (base_link -> shell_link
+    # -> rplidar_link) while its odom is namespaced (T7/odom -> T7/base_link), so
+    # the laser frame can't reach odom. Bridge with an identity static transform
+    # T7/base_link -> base_link. Published onto /<ns>/tf_static so AMCL sees it
+    # alongside the robot's other statics.
+    base_link_bridge = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        name='base_link_bridge', output='screen',
+        arguments=['--frame-id', [ns, '/base_link'], '--child-frame-id', 'base_link'],
+        remappings=[('/tf_static', ['/', ns, '/tf_static'])],
+    )
+
     map_server = Node(
         package='nav2_map_server', executable='map_server', name='map_server',
         namespace=ns, output='screen',
@@ -234,4 +246,5 @@ def generate_launch_description():
     # clock_bridge / scan_restamp self-gate on their args (IfCondition); both
     # default OFF. Enable with use_sim_time:=true (bridge) or restamp:=true (relay).
     return LaunchDescription(
-        args + [clock_bridge, scan_restamp, map_server, amcl, lifecycle_manager])
+        args + [clock_bridge, scan_restamp, base_link_bridge,
+                map_server, amcl, lifecycle_manager])
