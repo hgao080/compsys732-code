@@ -18,8 +18,8 @@ FRONT_BEARING_DEG = 90    # degrees — forward direction in scan frame
 # ── Wall Follow Config ────────────────────────────────────────────────────────
 WALL_LOST_THRESHOLD    = 0.38  # metres — right wall distance to declare wall lost
 WALL_LOST_SPEED        = 0.09  # m/s — forward speed when reacquiring right wall
-WALL_LOST_TURN         = 0.5   # rad/s — turn speed when reacquiring right wall (was 0.8)
-WALL_LOST_AVOID_DISTANCE = 0.25  # metres — lower front obstacle threshold during wall-lost recovery
+WALL_LOST_TURN         = 0.6   # rad/s — turn speed when reacquiring right wall (was 0.8)
+WALL_LOST_AVOID_DISTANCE = 0.28  # metres — lower front obstacle threshold during wall-lost recovery
 WALL_TARGET_DIST       = 0.28  # metres — desired distance to right wall
 WALL_KD                = 1.2   # proportional gain — perpendicular distance error
 WALL_KH                = 1.0   # proportional gain — wall heading angle error (new)
