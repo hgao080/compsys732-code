@@ -6,7 +6,7 @@ Brings up everything goal_nav.py needs for localization on a saved map:
   - clock_bridge      : mirrors the robot's timestamps onto /clock (embedded
                         below as an inline process — no separate file) so all
                         nodes share the robot's clock and AMCL stops dropping scans
-  - nav2_map_server   : publishes the static map on /T8/map
+  - nav2_map_server   : publishes the static map on /T7/map
   - nav2_amcl         : publishes the map->odom TF correction (localization)
   - lifecycle_manager : auto-configures + activates both (so you don't run
                         `ros2 lifecycle set ...` by hand)
@@ -19,11 +19,11 @@ RUN
     ros2 launch /path/to/bringup_localization.launch.py
     # override defaults if needed:
     ros2 launch ./bringup_localization.launch.py \
-        namespace:=T8 map:=$HOME/Desktop/lab_map.yaml \
+        namespace:=T7 map:=$HOME/Desktop/lab_map.yaml \
         init_x:=0.0 init_y:=0.0 init_yaw:=0.0
 
 THEN (separate terminal) verify the TF exists, then start your node:
-    ros2 run tf2_ros tf2_echo map T8/base_link
+    ros2 run tf2_ros tf2_echo map T7/base_link
     ros2 run tb4_sensor_reader demo_test
 """
 
@@ -47,7 +47,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import LaserScan
 
-SCAN_TOPIC = sys.argv[1] if len(sys.argv) > 1 else "/T8/scan"
+SCAN_TOPIC = sys.argv[1] if len(sys.argv) > 1 else "/T7/scan"
 
 class ClockBridge(Node):
     def __init__(self):
@@ -89,8 +89,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan
 
-IN_TOPIC  = sys.argv[1] if len(sys.argv) > 1 else "/T8/scan"
-OUT_TOPIC = sys.argv[2] if len(sys.argv) > 2 else "/T8/scan_restamped"
+IN_TOPIC  = sys.argv[1] if len(sys.argv) > 1 else "/T7/scan"
+OUT_TOPIC = sys.argv[2] if len(sys.argv) > 2 else "/T7/scan_restamped"
 
 class Restamp(Node):
     def __init__(self):
@@ -125,13 +125,13 @@ def generate_launch_description():
     init_y    = LaunchConfiguration('init_y')
     init_yaw  = LaunchConfiguration('init_yaw')
 
-    # Robot TF frames are namespaced (e.g. T8/odom, T8/base_link); the global
+    # Robot TF frames are namespaced (e.g. T7/odom, T7/base_link); the global
     # localization frame is the plain 'map'.
     base_frame = PythonExpression(["'", ns, "/base_link'"])
     odom_frame = PythonExpression(["'", ns, "/odom'"])
 
     args = [
-        DeclareLaunchArgument('namespace', default_value='T8'),
+        DeclareLaunchArgument('namespace', default_value='T7'),
         DeclareLaunchArgument(
             'map', default_value=os.path.expanduser('~/Desktop/lab_map.yaml')),
         # Clocks measured roughly synced -> real time. Only flip to true (and

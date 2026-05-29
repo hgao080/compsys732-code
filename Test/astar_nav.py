@@ -54,7 +54,7 @@ import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot / Topic Config ──────────────────────────────────────────────────────
-NAMESPACE   = 'T8'                       # ← your robot namespace ('' for none)
+NAMESPACE   = 'T7'                       # ← your robot namespace ('' for none)
 CMD_VEL     = f'{NAMESPACE}/cmd_vel'
 SCAN_TOPIC  = f'{NAMESPACE}/scan'
 ODOM_TOPIC  = f'{NAMESPACE}/odom'
