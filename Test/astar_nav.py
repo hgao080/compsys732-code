@@ -61,7 +61,7 @@ SCAN_TOPIC  = f'{NAMESPACE}/scan'
 ODOM_TOPIC  = f'{NAMESPACE}/odom'
 INITIALPOSE = f'{NAMESPACE}/initialpose'
 MAP_FRAME   = 'map'
-BASE_FRAME  = f'{NAMESPACE}/base_link'
+BASE_FRAME  = 'base_link'
 
 # ── Map Config ────────────────────────────────────────────────────────────────
 MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_map.yaml')  # ← saved map .yaml
@@ -84,7 +84,7 @@ GOAL_TOLERANCE  = 0.18        # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 ROBOT_RADIUS     = 0.18       # TurtleBot4 ~0.17 m radius
-INFLATION_RADIUS = 0.15       # metres — obstacles grown by this for planning
+INFLATION_RADIUS = 0.28       # metres — obstacles grown by this for planning
 PLAN_RESOLUTION  = 0.05       # metres/cell for the planner (map is coarsened to this)
 REPLAN_PERIOD_S  = 1.0        # seconds — periodic replan cadence
 MAX_RECOVERIES   = 6          # consecutive plan failures before giving up
@@ -94,7 +94,7 @@ MAX_RECOVERIES   = 6          # consecutive plan failures before giving up
 # The ACF_demo scripts treat forward as +90deg in the raw scan, i.e. the laser
 # frame is rotated -90deg vs base — hence the default below. If projected
 # obstacles look rotated in the debug view, adjust this first.
-LIDAR_YAW_OFFSET   = math.radians(-90.0)
+LIDAR_YAW_OFFSET   = math.radians(90.0)
 OBSTACLE_MAX_RANGE = 3.0      # metres — ignore returns beyond this for mapping
 OBSTACLE_DECAY     = 0.80     # per-scan decay of the dynamic layer (clears moved obstacles)
 OBSTACLE_HIT       = 1.0      # value written for a fresh hit
