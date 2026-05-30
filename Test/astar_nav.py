@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-astar_nav.py — Map-based autonomous navigation for TurtleBot4 (ROS2), no Nav2.
+Map-based autonomous navigation for TurtleBot4 (ROS2), no Nav2 using A* algorithm.
 
-WHAT IT DOES
-  1. Loads a pre-built occupancy map (.pgm + .yaml saved during your mapping run).
-  2. Localises on that map (AMCL via TF map->base_link, or raw odometry fallback).
+WHAT IT DOES:
+  1. Loads a pre-built occupancy map (.pgm + .yaml saved during Phase 1).
+  2. Localises on that map via AMCL (map -> base_link TF).
   3. Plans a path to a manually-specified goal (GOAL_X, GOAL_Y) with a custom
      A* planner running on the static map.
   4. While driving, projects live LiDAR returns into the map as a "dynamic
@@ -13,33 +13,21 @@ WHAT IT DOES
   5. Follows the path with a pure-pursuit controller, with an emergency stop
      if something is right in front.
 
-WHY NOT NAV2
-  Nav2's planner/controller/bt_navigator action servers are avoided (you report
-  unreliable comms). Everything here is plain pub/sub + TF + a self-contained
-  A* — no action servers, no lifecycle manager for the planning side.
-
-LOCALISATION NOTE
-  POSE_SOURCE = 'amcl' reads the AMCL-corrected pose from the map->base_link TF.
-  AMCL itself still needs to be running (it publishes that TF). If you have not
-  got AMCL working yet, set POSE_SOURCE = 'odom' to drive using wheel odometry
-  only — good for validating the planner / obstacle avoidance first. Odom drifts,
-  so the goal will be less accurate over a long traverse; switch to 'amcl' for
-  the real run.
+MAP PREREQS:
+  - A pre-built occupancy map in .pgm and .yaml format.
+  - Follow lab instructions
+  
+LOCALISATION NOTE:
+  Localisation uses AMCL (map -> base_link TF). AMCL must be running before launch.
+  An initial pose is published automatically at (START_X, START_Y, START_YAW).
 
   Minimal standalone AMCL bring-up (separate terminals, adjust namespace):
-    ros2 run nav2_map_server map_server --ros-args \
-        -p yaml_filename:=<your_map>.yaml -p frame_id:=map
-    ros2 run nav2_amcl amcl --ros-args -r __ns:=/T24 \
-        -p global_frame_id:=map -p odom_frame_id:=T24/odom \
-        -p base_frame_id:=T24/base_link -p scan_topic:=/T24/scan
-    # then activate both lifecycle nodes:
-    ros2 lifecycle set /map_server configure && ros2 lifecycle set /map_server activate
-    ros2 lifecycle set /T24/amcl configure && ros2 lifecycle set /T24/amcl activate
-  This node also publishes an initial pose at (START_X, START_Y, START_YAW) so
+    ros2 launch turtlebot4_navigation localization.launch.py \
+        map:=$HOME/Desktop/demo_map.yaml namespace:=/T7
+  
+  This node publishes an initial pose at (START_X, START_Y, START_YAW) so
   you don't have to set the "2D Pose Estimate" by hand in RViz.
 
-RUN
-    python3 astar_nav.py
 """
 
 import os, sys, math, time, heapq, yaml
@@ -47,54 +35,41 @@ import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan, CompressedImage
-from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
 import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot / Topic Config ──────────────────────────────────────────────────────
-NAMESPACE   = 'T8'                       # ← your robot namespace ('' for none)
+NAMESPACE   = 'T21'                       # ← your robot namespace ('' for none)
 CMD_VEL     = f'{NAMESPACE}/cmd_vel'
 SCAN_TOPIC  = f'{NAMESPACE}/scan'
-ODOM_TOPIC  = f'{NAMESPACE}/odom'
 INITIALPOSE = f'{NAMESPACE}/initialpose'
 MAP_FRAME   = 'map'
 BASE_FRAME  = 'base_link'
 
 # ── Map Config ────────────────────────────────────────────────────────────────
 MAP_YAML_PATH = os.path.expanduser('~/Desktop/lab_map.yaml')  # ← saved map .yaml
-ALLOW_UNKNOWN = False     # treat unknown (-1) map cells as obstacles (safer = False)
 
 # ── Pose Source ───────────────────────────────────────────────────────────────
-POSE_SOURCE = 'amcl'      # 'amcl' (map->base_link TF) or 'odom' (wheel odom only)
-SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup (only used for 'amcl')
+SEED_INITIAL_POSE = True  # publish AMCL initialpose on startup
 START_X, START_Y, START_YAW = 0.0, 0.0, 0.0   # robot's true start on the map
 INITIAL_POSE_DELAY_S = 2.0
-USE_SIM_TIME = False      # restamp path uses real time. Only true if running the scan-clock bridge.
 # This robot publishes its whole TF tree on the namespaced /<ns>/tf(_static),
 # not global /tf. When True, the node remaps its TF listener there automatically
 # (no need for `--ros-args -r /tf:=...` on the command line).
 TF_ON_ROBOT_NAMESPACE = True
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
-GOAL_X, GOAL_Y  = 0.322, -2.56    # ← read these off your map (metres, map frame)
-GOAL_TOLERANCE  = 0.18        # metres — close enough to count as arrived
+GOAL_X, GOAL_Y  = 0.58, -2.565    # ← read these off your map (metres, map frame)
+GOAL_TOLERANCE  = 0.1             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
-ROBOT_RADIUS     = 0.18       # TurtleBot4 ~0.17 m radius
 INFLATION_RADIUS = 0.2       # metres — obstacles grown by this for planning
-PLAN_RESOLUTION  = 0.05       # metres/cell for the planner (map is coarsened to this)
-REPLAN_PERIOD_S  = 1.0        # seconds — periodic replan cadence
-MAX_RECOVERIES   = 6          # consecutive plan failures before giving up
+REPLAN_PERIOD_S  = 1.0       # seconds — periodic replan cadence
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
-# Beam angle in the BASE frame = (angle_min + i*angle_increment) + LIDAR_YAW_OFFSET.
-# The ACF_demo scripts treat forward as +90deg in the raw scan, i.e. the laser
-# frame is rotated -90deg vs base — hence the default below. If projected
-# obstacles look rotated in the debug view, adjust this first.
 LIDAR_YAW_OFFSET   = math.radians(90.0)
 OBSTACLE_MAX_RANGE = 3.0      # metres — ignore returns beyond this for mapping
 OBSTACLE_DECAY     = 0.80     # per-scan decay of the dynamic layer (clears moved obstacles)
@@ -106,9 +81,13 @@ FORWARD_SPEED  = 0.15         # m/s
 MAX_TURN       = 1.0          # rad/s cap
 HEADING_KP     = 1.6          # proportional gain on heading error
 LOOKAHEAD      = 0.40         # metres — pure-pursuit lookahead
-TURN_IN_PLACE  = math.radians(45)  # |heading err| above this -> rotate, don't drive
-SAFE_STOP_DIST = 0.30         # metres — emergency stop if forward arc closer than this
-FRONT_ARC_DEG  = 30           # degrees either side of forward for the emergency check
+TURN_IN_PLACE  = math.radians(30)  # |heading err| above this -> rotate, don't drive
+SAFE_STOP_DIST = 0.3         # metres — emergency stop if forward arc closer than this
+FRONT_ARC_DEG  = 35           # degrees either side of forward for the emergency check
+WALL_FOLLOW_SPEED     = 0.12          # m/s during wall-following recovery
+WALL_FOLLOW_SIDE_DIST = 0.40          # metres — right side "clear" if farther than this
+WALL_TURN_SPEED       = 0.5           # rad/s for wall-follow turns
+WALL_ARC_DEG          = 30            # degrees either side of right for wall sensing
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 SHOW_VIS = True               # cv2 debug window (needs a display); set False if headless
@@ -126,7 +105,7 @@ CENTRE_SPIN_KP       = 0.3
 CENTRE_TIMEOUT_TICKS = 100
 CAPTURE_TICKS        = 50
 SCAN_SPIN_REVS       = 1.0
-ORIGIN_THRESHOLD     = 0.25
+ORIGIN_THRESHOLD     = 0.1
 SNAPSHOT_PATH        = os.path.expanduser('~/detection_snapshot.jpg')
 
 # ── States ────────────────────────────────────────────────────────────────────
@@ -137,7 +116,6 @@ SCAN_SPIN      = 'SCAN_SPIN'
 CENTRE_ON_CUBE = 'CENTRE_ON_CUBE'
 CAPTURE        = 'CAPTURE'
 RETURNING      = 'RETURNING'
-GIVE_UP        = 'GIVE_UP'
 DONE           = 'DONE'
 
 
@@ -178,35 +156,16 @@ def load_map(yaml_path):
     return occupied, unknown, res, (float(origin[0]), float(origin[1]))
 
 
-def coarsen(mask, f):
-    """Max-pool a boolean grid by integer factor f (occupied if any sub-cell is).
-
-    Pads at the high-index end (high x / high y) so the lower-left origin stays
-    anchored.
-    """
-    if f <= 1:
-        return mask
-    h, w = mask.shape
-    hp = ((h + f - 1) // f) * f
-    wp = ((w + f - 1) // f) * f
-    padded = np.zeros((hp, wp), dtype=bool)
-    padded[:h, :w] = mask
-    return padded.reshape(hp // f, f, wp // f, f).max(axis=(1, 3))
-
-
 class AStarNav(Node):
 
     def __init__(self):
-        super().__init__(
-            'astar_nav',
-            parameter_overrides=[Parameter('use_sim_time', Parameter.Type.BOOL, USE_SIM_TIME)])
+        super().__init__('astar_nav')
 
         # ── Load + prepare the map ──
         occ, unk, res0, origin = load_map(MAP_YAML_PATH)
-        factor = max(1, int(round(PLAN_RESOLUTION / res0)))
-        self.occupied = coarsen(occ, factor)
-        self.unknown  = coarsen(unk, factor)
-        self.pres     = res0 * factor                 # planning resolution (m/cell)
+        self.occupied = occ
+        self.unknown  = unk
+        self.pres     = res0
         self.ox, self.oy = origin
         self.H, self.W = self.occupied.shape          # rows (y), cols (x)
 
@@ -223,12 +182,13 @@ class AStarNav(Node):
         self.current_x = START_X
         self.current_y = START_Y
         self.current_yaw = START_YAW
-        self.pose_ok = (POSE_SOURCE == 'odom')        # odom assumed available; amcl waits for TF
+        self.pose_ok = False
         self.tf_err = ''                              # last TF lookup failure reason
         self._wait_log = 0                            # throttle WAIT_FOR_POSE logging
 
         # ── LiDAR state ──
         self.front_min = float('inf')
+        self.right_min = float('inf')
         self.have_scan = False
 
         # ── Plan / control state ──
@@ -236,12 +196,9 @@ class AStarNav(Node):
         self.path_idx = 0
         self.last_plan_time = 0.0
         self.need_replan = True
-        self.recovery_ticks = 0
-        self.recovery_count = 0
         self.active_goal = (GOAL_X, GOAL_Y)
         self.state = WAIT_FOR_POSE
         self.start_time = time.time()
-        self.done_logged = False
 
         # ── Camera / detection state ──
         self.bridge          = CvBridge()
@@ -261,23 +218,20 @@ class AStarNav(Node):
         self.create_subscription(LaserScan, SCAN_TOPIC, self.scan_callback, 10)
         self.create_subscription(CompressedImage, CAMERA_TOPIC, self.image_callback, 10)
 
-        if POSE_SOURCE == 'amcl':
-            self.tf_buffer = tf2_ros.Buffer()
-            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-            if SEED_INITIAL_POSE:
-                self.initial_pose_pub = self.create_publisher(
-                    PoseWithCovarianceStamped, INITIALPOSE, 10)
-                self._seeded = False
-                self.create_timer(INITIAL_POSE_DELAY_S, self._seed_initial_pose)
-        else:
-            self.create_subscription(Odometry, ODOM_TOPIC, self.odom_callback, 10)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        if SEED_INITIAL_POSE:
+            self.initial_pose_pub = self.create_publisher(
+                PoseWithCovarianceStamped, INITIALPOSE, 10)
+            self._seeded = False
+            self.create_timer(INITIAL_POSE_DELAY_S, self._seed_initial_pose)
 
         self.timer = self.create_timer(0.1, self.control_loop)
 
         gr, gc = self.world_to_cell(GOAL_X, GOAL_Y)
         self.get_logger().info(
             f'astar_nav up | map {self.W}x{self.H} @ {self.pres:.3f} m/cell '
-            f'origin=({self.ox:.2f},{self.oy:.2f}) | pose_source={POSE_SOURCE} | '
+            f'origin=({self.ox:.2f},{self.oy:.2f}) | pose_source=amcl | '
             f'goal=({GOAL_X:.2f},{GOAL_Y:.2f}) cell=({gr},{gc})')
 
     # ── Coordinate helpers (grids are Y-UP) ─────────────────────────────────--
@@ -331,14 +285,6 @@ class AStarNav(Node):
         except (LookupException, ConnectivityException, ExtrapolationException) as e:
             self.tf_err = type(e).__name__  # keep last known pose; AMCL not ready yet
 
-    def odom_callback(self, msg):
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
-        self.current_yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-        self.pose_ok = True
-
     # ── LiDAR: emergency arc + dynamic obstacle projection ─────────────────────
     def scan_callback(self, msg):
         ranges = np.asarray(msg.ranges, dtype=np.float64)
@@ -351,6 +297,11 @@ class AStarNav(Node):
         fa = np.abs(np.arctan2(np.sin(base_ang), np.cos(base_ang)))
         front_mask = valid & (fa < math.radians(FRONT_ARC_DEG))
         self.front_min = float(ranges[front_mask].min()) if front_mask.any() else float('inf')
+
+        # Right side arc (base-frame angle ~-π/2) for wall-following.
+        ra = np.abs(np.arctan2(np.sin(base_ang + math.pi / 2), np.cos(base_ang + math.pi / 2)))
+        right_mask = valid & (ra < math.radians(WALL_ARC_DEG))
+        self.right_min = float(ranges[right_mask].min()) if right_mask.any() else float('inf')
 
         # Project valid returns into the map frame -> dynamic obstacle layer.
         # Only mark cells that are free in the static map — avoids wall-bleed inflation.
@@ -388,8 +339,7 @@ class AStarNav(Node):
     # ── Build inflated cost grid ───────────────────────────────────────────--
     def _build_blocked(self):
         occ = self.occupied.copy()
-        if not ALLOW_UNKNOWN:
-            occ |= self.unknown
+        occ |= self.unknown
         occ |= (self.obstacle_grid >= OBSTACLE_THRESH)
         inflated = cv2.dilate(occ.astype(np.uint8), self.kernel)
         return inflated > 0
@@ -475,8 +425,7 @@ class AStarNav(Node):
 
         # Static-only inflated grid (no dynamic LiDAR layer).
         static_occ = self.occupied.copy()
-        if not ALLOW_UNKNOWN:
-            static_occ |= self.unknown
+        static_occ |= self.unknown
         static_infl = cv2.dilate(static_occ.astype(np.uint8), self.kernel) > 0
 
         # Is start<->goal connected on the static map alone?
@@ -579,10 +528,18 @@ class AStarNav(Node):
     def follow_path(self):
         msg = Twist()
 
-        # Emergency stop: something close ahead. Stop, route around it.
+        # Emergency stop: something close ahead. Block forward motion but allow
+        # rotation so the robot can turn toward the replanned path.
         if self.front_min < SAFE_STOP_DIST:
             self.need_replan = True
-            self.cmd_pub.publish(Twist())   # stop
+            msg = Twist()
+            if self.path and self.path_idx < len(self.path):
+                tx, ty = self.path[self.path_idx]
+                heading = math.atan2(ty - self.current_y, tx - self.current_x)
+                err = math.atan2(math.sin(heading - self.current_yaw),
+                                 math.cos(heading - self.current_yaw))
+                msg.angular.z = max(-MAX_TURN, min(MAX_TURN, HEADING_KP * err))
+            self.cmd_pub.publish(msg)
             self.get_logger().warn(
                 f'Obstacle {self.front_min:.2f} m ahead — stopping, replanning')
             return
@@ -604,8 +561,7 @@ class AStarNav(Node):
 
     # ── Main control loop ──────────────────────────────────────────────────--
     def control_loop(self):
-        if POSE_SOURCE == 'amcl':
-            self.update_pose_from_tf()
+        self.update_pose_from_tf()
 
         # Detection interrupt: cube seen during navigation or scan spin
         if (self.state in (NAVIGATE, SCAN_SPIN)
@@ -656,28 +612,27 @@ class AStarNav(Node):
                 self._do_navigate()
 
         elif self.state == RECOVERY:
+            due = (time.time() - self.last_plan_time) > REPLAN_PERIOD_S
+            if due:
+                self.blocked = self._build_blocked()
+                if self.replan():
+                    self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
+                    return
             msg = Twist()
-            if self.recovery_ticks < 8 and self.front_min > SAFE_STOP_DIST:
-                msg.linear.x = -0.06
+            if self.right_min > WALL_FOLLOW_SIDE_DIST:
+                msg.angular.z = -WALL_TURN_SPEED
+                msg.linear.x  = WALL_FOLLOW_SPEED
+            elif self.front_min > SAFE_STOP_DIST:
+                msg.linear.x  = WALL_FOLLOW_SPEED
             else:
-                msg.angular.z = 0.5
+                msg.angular.z = WALL_TURN_SPEED
             self.cmd_pub.publish(msg)
-            self.recovery_ticks += 1
-            if self.recovery_ticks >= 20:
-                self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
-                self.need_replan = True
 
         elif self.state == DONE:
             self.cmd_pub.publish(Twist())
             if not self.mission_logged:
                 self.mission_logged = True
                 self.log_mission_summary()
-
-        elif self.state == GIVE_UP:
-            self.cmd_pub.publish(Twist())
-            if not self.done_logged:
-                self.done_logged = True
-                self.get_logger().error('No path after repeated attempts — giving up.')
 
         self._maybe_show()
 
@@ -688,16 +643,10 @@ class AStarNav(Node):
         if self.need_replan or due or not self.path or self.path_is_blocked():
             ok = self.replan()
             if not ok:
-                self.recovery_count += 1
-                if self.recovery_count >= MAX_RECOVERIES:
-                    self.state = GIVE_UP
-                else:
-                    self.state = RECOVERY
-                    self.recovery_ticks = 0
+                self.state = RECOVERY
                 self.cmd_pub.publish(Twist())
                 self._maybe_show()
                 return
-            self.recovery_count = 0
         self.follow_path()
 
     def do_scan_spin(self):
@@ -753,7 +702,6 @@ class AStarNav(Node):
         self.active_goal = (0.0, 0.0)
         self.path = []
         self.need_replan = True
-        self.recovery_count = 0
         self.state = RETURNING
         self.get_logger().info('RETURNING to origin (0, 0)')
 
