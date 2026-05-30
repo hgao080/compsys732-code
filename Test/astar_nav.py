@@ -66,12 +66,12 @@ GOAL_X, GOAL_Y  = 0.58, -2.565    # ← read these off your map (metres, map fra
 GOAL_TOLERANCE  = 0.1             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
-INFLATION_RADIUS = 0.2       # metres — obstacles grown by this for planning
+INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
 REPLAN_PERIOD_S  = 1.0       # seconds — periodic replan cadence
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
 LIDAR_YAW_OFFSET   = math.radians(90.0)
-OBSTACLE_MAX_RANGE = 3.0      # metres — ignore returns beyond this for mapping
+OBSTACLE_MAX_RANGE = 2.0      # metres — ignore returns beyond this for mapping
 OBSTACLE_DECAY     = 0.80     # per-scan decay of the dynamic layer (clears moved obstacles)
 OBSTACLE_HIT       = 1.0      # value written for a fresh hit
 OBSTACLE_THRESH    = 0.40     # dynamic-layer value above which a cell counts as blocked
@@ -84,10 +84,16 @@ LOOKAHEAD      = 0.40         # metres — pure-pursuit lookahead
 TURN_IN_PLACE  = math.radians(30)  # |heading err| above this -> rotate, don't drive
 SAFE_STOP_DIST = 0.3         # metres — emergency stop if forward arc closer than this
 FRONT_ARC_DEG  = 35           # degrees either side of forward for the emergency check
-WALL_FOLLOW_SPEED     = 0.12          # m/s during wall-following recovery
-WALL_FOLLOW_SIDE_DIST = 0.40          # metres — right side "clear" if farther than this
-WALL_TURN_SPEED       = 0.5           # rad/s for wall-follow turns
-WALL_ARC_DEG          = 30            # degrees either side of right for wall sensing
+FRONT_BEARING_DEG     = 90            # degrees — forward direction in scan frame
+WALL_LOST_THRESHOLD   = 0.40          # metres — right wall distance to declare wall lost
+TURN_SPEED            = 0.6           # rad/s for wall-follow turns
+WALL_LOST_SPEED       = 0.05          # m/s — forward speed when reacquiring right wall
+WALL_LOST_TURN        = 0.7           # rad/s — turn speed when reacquiring right wall
+WALL_TARGET_DIST      = 0.29          # metres — desired distance to right wall
+WALL_KP               = 1.2           # proportional gain for right-wall distance control
+WALL_LOST_GAP_TICKS   = 15            # ticks of continuous wall-loss before gap-crossing
+GAP_CROSS_SPEED       = 0.08          # m/s — forward speed while threading a gap
+GAP_CLEAR_ARC_DEG     = 8             # degrees either side of forward for gap check
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 SHOW_VIS = True               # cv2 debug window (needs a display); set False if headless
@@ -187,9 +193,11 @@ class AStarNav(Node):
         self._wait_log = 0                            # throttle WAIT_FOR_POSE logging
 
         # ── LiDAR state ──
-        self.front_min = float('inf')
-        self.right_min = float('inf')
-        self.have_scan = False
+        self.front_min    = float('inf')
+        self.front_narrow = float('inf')
+        self.right_min    = float('inf')
+        self.have_scan    = False
+        self.recovery_gap_ticks = 0
 
         # ── Plan / control state ──
         self.path = []            # list of (wx, wy) world waypoints, start -> goal
@@ -293,15 +301,17 @@ class AStarNav(Node):
         valid = (np.isfinite(ranges) & (ranges > msg.range_min) &
                  (ranges < min(msg.range_max, OBSTACLE_MAX_RANGE)))
 
-        # Forward arc minimum (for emergency stop) — uses base-frame angle ~0.
-        fa = np.abs(np.arctan2(np.sin(base_ang), np.cos(base_ang)))
-        front_mask = valid & (fa < math.radians(FRONT_ARC_DEG))
-        self.front_min = float(ranges[front_mask].min()) if front_mask.any() else float('inf')
+        front_i  = int(round(math.radians(FRONT_BEARING_DEG) / msg.angle_increment))
+        half_a   = int(round(math.radians(FRONT_ARC_DEG)     / msg.angle_increment))
+        gap_half = int(round(math.radians(GAP_CLEAR_ARC_DEG) / msg.angle_increment))
 
-        # Right side arc (base-frame angle ~-π/2) for wall-following.
-        ra = np.abs(np.arctan2(np.sin(base_ang + math.pi / 2), np.cos(base_ang + math.pi / 2)))
-        right_mask = valid & (ra < math.radians(WALL_ARC_DEG))
-        self.right_min = float(ranges[right_mask].min()) if right_mask.any() else float('inf')
+        front_mask  = valid & (idx >= front_i - half_a)  & (idx <= front_i + half_a)
+        narrow_mask = valid & (idx >= front_i - gap_half) & (idx <= front_i + gap_half)
+        right_mask  = valid & (idx < front_i - half_a)
+
+        self.front_min    = float(ranges[front_mask].min())  if front_mask.any()  else float('inf')
+        self.front_narrow = float(ranges[narrow_mask].min()) if narrow_mask.any() else float('inf')
+        self.right_min    = float(ranges[right_mask].min())  if right_mask.any()  else float('inf')
 
         # Project valid returns into the map frame -> dynamic obstacle layer.
         # Only mark cells that are free in the static map — avoids wall-bleed inflation.
@@ -616,16 +626,30 @@ class AStarNav(Node):
             if due:
                 self.blocked = self._build_blocked()
                 if self.replan():
+                    self.recovery_gap_ticks = 0
                     self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
                     return
             msg = Twist()
-            if self.right_min > WALL_FOLLOW_SIDE_DIST:
-                msg.angular.z = -WALL_TURN_SPEED
-                msg.linear.x  = WALL_FOLLOW_SPEED
-            elif self.front_min > SAFE_STOP_DIST:
-                msg.linear.x  = WALL_FOLLOW_SPEED
+            if self.front_min < SAFE_STOP_DIST:
+                msg.linear.x  = 0.0
+                msg.angular.z = TURN_SPEED
+            elif self.right_min > WALL_LOST_THRESHOLD:
+                self.recovery_gap_ticks += 1
+                if self.recovery_gap_ticks > WALL_LOST_GAP_TICKS:
+                    if self.front_narrow < SAFE_STOP_DIST:
+                        msg.linear.x  = 0.0
+                        msg.angular.z = TURN_SPEED
+                    else:
+                        msg.linear.x  = GAP_CROSS_SPEED
+                        msg.angular.z = -0.2
+                else:
+                    msg.linear.x  = WALL_LOST_SPEED
+                    msg.angular.z = -WALL_LOST_TURN
             else:
-                msg.angular.z = WALL_TURN_SPEED
+                self.recovery_gap_ticks = 0
+                error = self.right_min - WALL_TARGET_DIST
+                msg.linear.x  = FORWARD_SPEED
+                msg.angular.z = -WALL_KP * error
             self.cmd_pub.publish(msg)
 
         elif self.state == DONE:
