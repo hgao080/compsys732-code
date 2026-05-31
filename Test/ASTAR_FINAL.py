@@ -105,9 +105,11 @@ RED_LOW1             = np.array([0,   95,  95])
 RED_HIGH1            = np.array([8,  255, 255])
 RED_LOW2             = np.array([177, 95,  95])
 RED_HIGH2            = np.array([180, 255, 255])
-MIN_PIXELS_CENTRE    = 8500
-CENTRE_TOLERANCE_PX  = 2000
-CENTRE_SPIN_KP       = 0.3
+MIN_PIXELS_CENTRE    = 7000
+CENTRE_TOLERANCE_PX  = 15
+CENTRE_SPIN_KP       = 0.15
+CENTRE_SPIN_MAX      = 0.2            # rad/s — hard cap on centering spin speed
+CENTRE_CONFIRM_TICKS = 8             # ticks stopped within tolerance before CAPTURE
 CENTRE_TIMEOUT_TICKS = 100
 CAPTURE_TICKS        = 50
 SCAN_SPIN_REVS       = 1.0
@@ -216,6 +218,7 @@ class AStarNav(Node):
         self.latest_img      = None
         self.red_pixels      = 0
         self.centre_ticks    = 0
+        self.centre_confirm  = 0
         self.capture_ticks   = 0
         self.spin_ticks      = 0
         self.cube_world_pos  = None
@@ -596,6 +599,7 @@ class AStarNav(Node):
                 and self.red_pixels >= MIN_PIXELS_CENTRE):
             self.cmd_pub.publish(Twist())
             self.centre_ticks = 0
+            self.centre_confirm = 0
             self.state = CENTRE_ON_CUBE
             self.get_logger().info(
                 f'Red cube detected ({self.red_pixels} px) → CENTRE_ON_CUBE')
@@ -715,14 +719,31 @@ class AStarNav(Node):
             return
         error = self.cube_cx - self.image_width / 2
         self.centre_ticks += 1
-        if abs(error) <= CENTRE_TOLERANCE_PX or self.centre_ticks >= CENTRE_TIMEOUT_TICKS:
+
+        if self.centre_ticks >= CENTRE_TIMEOUT_TICKS:
             self.capture_ticks = 0
+            self.centre_confirm = 0
             self.state = CAPTURE
-            reason = 'timeout' if self.centre_ticks >= CENTRE_TIMEOUT_TICKS else f'{error:.0f}px'
-            self.get_logger().info(f'Cube centred ({reason}) → CAPTURE')
+            self.get_logger().info(f'Cube centre timeout → CAPTURE (error={error:.0f}px)')
             return
+
+        if abs(error) <= CENTRE_TOLERANCE_PX:
+            self.cmd_pub.publish(Twist())   # stop while confirming
+            self.centre_confirm += 1
+            self.get_logger().info(
+                f'Centring confirm {self.centre_confirm}/{CENTRE_CONFIRM_TICKS} error={error:.0f}px')
+            if self.centre_confirm >= CENTRE_CONFIRM_TICKS:
+                self.capture_ticks = 0
+                self.centre_confirm = 0
+                self.state = CAPTURE
+                self.get_logger().info('Cube centred + confirmed → CAPTURE')
+            return
+
+        # Outside tolerance — reset confirm and keep spinning
+        self.centre_confirm = 0
         msg = Twist()
-        msg.angular.z = -CENTRE_SPIN_KP * (error / (self.image_width / 2))
+        raw = -CENTRE_SPIN_KP * (error / (self.image_width / 2))
+        msg.angular.z = max(-CENTRE_SPIN_MAX, min(CENTRE_SPIN_MAX, raw))
         self.cmd_pub.publish(msg)
 
     def do_capture(self):
