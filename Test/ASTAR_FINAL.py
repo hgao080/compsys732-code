@@ -592,7 +592,7 @@ class AStarNav(Node):
             return
 
         # Detection interrupt: cube seen during navigation or scan spin
-        if (self.state in (NAVIGATE, SCAN_SPIN)
+        if (self.state == SCAN_SPIN
                 and self.red_pixels >= MIN_PIXELS_CENTRE):
             self.cmd_pub.publish(Twist())
             self.centre_ticks = 0
@@ -737,9 +737,10 @@ class AStarNav(Node):
                 cv2.imwrite(SNAPSHOT_PATH, self.latest_img)
                 self.get_logger().info(f'Snapshot saved → {SNAPSHOT_PATH}')
             if self.cube_front_min != float('inf'):
+                d = self.cube_front_min + 0.06
                 self.cube_world_pos = (
-                    x + self.cube_front_min * math.cos(yaw),
-                    y + self.cube_front_min * math.sin(yaw))
+                    x + d * math.cos(yaw),
+                    y + d * math.sin(yaw))
                 self.get_logger().info(
                     f'[REPORT] Cube world pos ({self.cube_world_pos[0]:.3f}, '
                     f'{self.cube_world_pos[1]:.3f}) m')
