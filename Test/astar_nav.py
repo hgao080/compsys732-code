@@ -111,6 +111,7 @@ CENTRE_TIMEOUT_TICKS = 100
 CAPTURE_TICKS        = 50
 SCAN_SPIN_REVS       = 1.0
 ORIGIN_THRESHOLD     = 0.1
+RETURN_NEAR_ORIGIN   = 0.5    # metres — switch to direct bearing control for final approach
 SNAPSHOT_PATH        = os.path.expanduser('~/detection_snapshot.jpg')
 
 # ── States ────────────────────────────────────────────────────────────────────
@@ -345,10 +346,11 @@ class AStarNav(Node):
         cv2.waitKey(1)
 
     # ── Build inflated cost grid ───────────────────────────────────────────--
-    def _build_blocked(self):
+    def _build_blocked(self, static_only=False):
         occ = self.occupied.copy()
         occ |= self.unknown
-        occ |= (self.obstacle_grid >= OBSTACLE_THRESH)
+        if not static_only:
+            occ |= (self.obstacle_grid >= OBSTACLE_THRESH)
         inflated = cv2.dilate(occ.astype(np.uint8), self.kernel)
         return inflated > 0
 
@@ -615,6 +617,15 @@ class AStarNav(Node):
                 self.cmd_pub.publish(Twist())
                 self.state = DONE
                 self.get_logger().info('HOME — mission complete')
+            elif self.dist_to_goal() < RETURN_NEAR_ORIGIN:
+                gx, gy = self.active_goal
+                heading = math.atan2(gy - self.current_y, gx - self.current_x)
+                err = math.atan2(math.sin(heading - self.current_yaw),
+                                 math.cos(heading - self.current_yaw))
+                msg = Twist()
+                msg.angular.z = max(-MAX_TURN, min(MAX_TURN, HEADING_KP * err))
+                msg.linear.x = 0.0 if abs(err) > TURN_IN_PLACE else FORWARD_SPEED
+                self.cmd_pub.publish(msg)
             else:
                 self._do_navigate()
 
