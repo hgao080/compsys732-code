@@ -70,10 +70,10 @@ INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
 LIDAR_YAW_OFFSET   = math.radians(90.0)
-OBSTACLE_MAX_RANGE = 2.0      # metres — ignore returns beyond this for mapping
-OBSTACLE_DECAY     = 0.80     # per-scan decay of the dynamic layer (clears moved obstacles)
+OBSTACLE_MAX_RANGE = 0.8      # metres — ignore returns beyond this for mapping
+OBSTACLE_DECAY     = 0.6     # per-scan decay of the dynamic layer (clears moved obstacles)
 OBSTACLE_HIT       = 1.0      # value written for a fresh hit
-OBSTACLE_THRESH    = 0.40     # dynamic-layer value above which a cell counts as blocked
+OBSTACLE_THRESH    = 0.6     # dynamic-layer value above which a cell counts as blocked
 
 # ── Control Config ────────────────────────────────────────────────────────────
 FORWARD_SPEED  = 0.14         # m/s
@@ -105,7 +105,7 @@ RED_HIGH1            = np.array([8,  255, 255])
 RED_LOW2             = np.array([177, 95,  95])
 RED_HIGH2            = np.array([180, 255, 255])
 MIN_PIXELS_CENTRE    = 8500
-CENTRE_TOLERANCE_PX  = 15
+CENTRE_TOLERANCE_PX  = 2000
 CENTRE_SPIN_KP       = 0.3
 CENTRE_TIMEOUT_TICKS = 100
 CAPTURE_TICKS        = 50
@@ -219,6 +219,7 @@ class AStarNav(Node):
         self.cube_world_pos  = None
         self.photo_robot_pos = None
         self.mission_logged  = False
+        self.paused          = False
 
         # ── ROS interfaces ──
         self.cmd_pub = self.create_publisher(Twist, CMD_VEL, 10)
@@ -343,7 +344,8 @@ class AStarNav(Node):
         cv2.putText(overlay, f'Red: {self.red_pixels}  state: {self.state}',
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.imshow('Detection', overlay)
-        cv2.waitKey(1)
+        if cv2.waitKey(1) & 0xFF in (ord('p'), ord('P')):
+            self._toggle_pause()
 
     # ── Build inflated cost grid ───────────────────────────────────────────--
     def _build_blocked(self, static_only=False):
@@ -568,9 +570,21 @@ class AStarNav(Node):
         msg.linear.x = 0.0 if abs(err) > TURN_IN_PLACE else FORWARD_SPEED
         self.cmd_pub.publish(msg)
 
+    def _toggle_pause(self):
+        self.paused = not self.paused
+        if self.paused:
+            self.cmd_pub.publish(Twist())
+            self.get_logger().warn('PAUSED — manual teleop active. Press P to resume.')
+        else:
+            self.path = []
+            self.need_replan = True
+            self.get_logger().warn('RESUMED — replanning from current position.')
+
     # ── Main control loop ──────────────────────────────────────────────────--
     def control_loop(self):
         self.update_pose_from_tf()
+        if self.paused:
+            return
 
         # Detection interrupt: cube seen during navigation or scan spin
         if (self.state in (NAVIGATE, SCAN_SPIN)
@@ -781,7 +795,8 @@ class AStarNav(Node):
         cv2.putText(disp, f'{self.state}  d={self.dist_to_goal():.2f}m',
                     (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
         cv2.imshow('astar_nav', disp)
-        cv2.waitKey(1)
+        if cv2.waitKey(1) & 0xFF in (ord('p'), ord('P')):
+            self._toggle_pause()
 
 
 def main(args=None):
