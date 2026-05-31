@@ -67,7 +67,6 @@ GOAL_TOLERANCE  = 0.1             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
-REPLAN_PERIOD_S  = 1.0       # seconds — periodic replan cadence
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
 LIDAR_YAW_OFFSET   = math.radians(90.0)
@@ -77,12 +76,12 @@ OBSTACLE_HIT       = 1.0      # value written for a fresh hit
 OBSTACLE_THRESH    = 0.40     # dynamic-layer value above which a cell counts as blocked
 
 # ── Control Config ────────────────────────────────────────────────────────────
-FORWARD_SPEED  = 0.15         # m/s
+FORWARD_SPEED  = 0.14         # m/s
 MAX_TURN       = 1.0          # rad/s cap
 HEADING_KP     = 1.6          # proportional gain on heading error
 LOOKAHEAD      = 0.40         # metres — pure-pursuit lookahead
 TURN_IN_PLACE  = math.radians(30)  # |heading err| above this -> rotate, don't drive
-SAFE_STOP_DIST = 0.3         # metres — emergency stop if forward arc closer than this
+SAFE_STOP_DIST = 0.35         # metres — emergency stop if forward arc closer than this
 FRONT_ARC_DEG  = 35           # degrees either side of forward for the emergency check
 FRONT_BEARING_DEG     = 90            # degrees — forward direction in scan frame
 WALL_LOST_THRESHOLD   = 0.40          # metres — right wall distance to declare wall lost
@@ -202,7 +201,6 @@ class AStarNav(Node):
         # ── Plan / control state ──
         self.path = []            # list of (wx, wy) world waypoints, start -> goal
         self.path_idx = 0
-        self.last_plan_time = 0.0
         self.need_replan = True
         self.active_goal = (GOAL_X, GOAL_Y)
         self.state = WAIT_FOR_POSE
@@ -467,7 +465,6 @@ class AStarNav(Node):
         self.blocked = self._build_blocked()
         start = self.world_to_cell(self.current_x, self.current_y)
         goal = self.world_to_cell(*self.active_goal)
-        self.last_plan_time = time.time()
         self.need_replan = False
 
         if not self.in_bounds(*start):
@@ -622,13 +619,11 @@ class AStarNav(Node):
                 self._do_navigate()
 
         elif self.state == RECOVERY:
-            due = (time.time() - self.last_plan_time) > REPLAN_PERIOD_S
-            if due:
-                self.blocked = self._build_blocked()
-                if self.replan():
-                    self.recovery_gap_ticks = 0
-                    self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
-                    return
+            self.blocked = self._build_blocked()
+            if self.replan():
+                self.recovery_gap_ticks = 0
+                self.state = NAVIGATE if self.active_goal != (0.0, 0.0) else RETURNING
+                return
             msg = Twist()
             if self.front_min < SAFE_STOP_DIST:
                 msg.linear.x  = 0.0
@@ -663,8 +658,7 @@ class AStarNav(Node):
     def _do_navigate(self):
         """Shared A* navigation logic used by both NAVIGATE and RETURNING."""
         self.blocked = self._build_blocked()
-        due = (time.time() - self.last_plan_time) > REPLAN_PERIOD_S
-        if self.need_replan or due or not self.path or self.path_is_blocked():
+        if self.need_replan or not self.path or self.path_is_blocked():
             ok = self.replan()
             if not ok:
                 self.state = RECOVERY
