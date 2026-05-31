@@ -743,10 +743,31 @@ class AStarNav(Node):
 
     def _begin_return(self):
         self.active_goal = (0.0, 0.0)
+        self.obstacle_grid[:] = 0
         self.path = []
         self.need_replan = True
         self.state = RETURNING
+        self._reseed_amcl()
         self.get_logger().info('RETURNING to origin (0, 0)')
+
+    def _reseed_amcl(self):
+        """Re-publish initialpose at current TF position to reset AMCL particle diversity."""
+        if not hasattr(self, 'initial_pose_pub'):
+            return
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = MAP_FRAME
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = self.current_x
+        msg.pose.pose.position.y = self.current_y
+        msg.pose.pose.orientation.z = math.sin(self.current_yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(self.current_yaw / 2.0)
+        msg.pose.covariance[0]  = 0.10
+        msg.pose.covariance[7]  = 0.10
+        msg.pose.covariance[35] = 0.05
+        self.initial_pose_pub.publish(msg)
+        self.get_logger().info(
+            f'AMCL re-seeded at ({self.current_x:.2f},{self.current_y:.2f}) '
+            f'yaw={math.degrees(self.current_yaw):.1f}°')
 
     def log_mission_summary(self):
         elapsed = time.time() - self.start_time
