@@ -93,6 +93,7 @@ WALL_KP               = 1.2           # proportional gain for right-wall distanc
 WALL_LOST_GAP_TICKS   = 15            # ticks of continuous wall-loss before gap-crossing
 GAP_CROSS_SPEED       = 0.08          # m/s — forward speed while threading a gap
 GAP_CLEAR_ARC_DEG     = 8             # degrees either side of forward for gap check
+CUBE_RANGE_ARC_DEG    = 5             # degrees either side of forward for cube distance
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 SHOW_VIS = True               # cv2 debug window (needs a display); set False if headless
@@ -195,6 +196,7 @@ class AStarNav(Node):
         # ── LiDAR state ──
         self.front_min    = float('inf')
         self.front_narrow = float('inf')
+        self.cube_front_min = float('inf')
         self.right_min    = float('inf')
         self.have_scan    = False
         self.recovery_gap_ticks = 0
@@ -301,17 +303,20 @@ class AStarNav(Node):
         valid = (np.isfinite(ranges) & (ranges > msg.range_min) &
                  (ranges < min(msg.range_max, OBSTACLE_MAX_RANGE)))
 
-        front_i  = int(round(math.radians(FRONT_BEARING_DEG) / msg.angle_increment))
-        half_a   = int(round(math.radians(FRONT_ARC_DEG)     / msg.angle_increment))
-        gap_half = int(round(math.radians(GAP_CLEAR_ARC_DEG) / msg.angle_increment))
+        front_i   = int(round(math.radians(FRONT_BEARING_DEG)  / msg.angle_increment))
+        half_a    = int(round(math.radians(FRONT_ARC_DEG)      / msg.angle_increment))
+        gap_half  = int(round(math.radians(GAP_CLEAR_ARC_DEG)  / msg.angle_increment))
+        cube_half = int(round(math.radians(CUBE_RANGE_ARC_DEG) / msg.angle_increment))
 
-        front_mask  = valid & (idx >= front_i - half_a)  & (idx <= front_i + half_a)
-        narrow_mask = valid & (idx >= front_i - gap_half) & (idx <= front_i + gap_half)
+        front_mask  = valid & (idx >= front_i - half_a)   & (idx <= front_i + half_a)
+        narrow_mask = valid & (idx >= front_i - gap_half)  & (idx <= front_i + gap_half)
+        cube_mask   = valid & (idx >= front_i - cube_half) & (idx <= front_i + cube_half)
         right_mask  = valid & (idx < front_i - half_a)
 
-        self.front_min    = float(ranges[front_mask].min())  if front_mask.any()  else float('inf')
-        self.front_narrow = float(ranges[narrow_mask].min()) if narrow_mask.any() else float('inf')
-        self.right_min    = float(ranges[right_mask].min())  if right_mask.any()  else float('inf')
+        self.front_min      = float(ranges[front_mask].min())  if front_mask.any()  else float('inf')
+        self.front_narrow   = float(ranges[narrow_mask].min()) if narrow_mask.any() else float('inf')
+        self.cube_front_min = float(ranges[cube_mask].min())   if cube_mask.any()   else float('inf')
+        self.right_min      = float(ranges[right_mask].min())  if right_mask.any()  else float('inf')
 
         # Project valid returns into the map frame -> dynamic obstacle layer.
         # Only mark cells that are free in the static map — avoids wall-bleed inflation.
@@ -731,10 +736,10 @@ class AStarNav(Node):
             if self.latest_img is not None:
                 cv2.imwrite(SNAPSHOT_PATH, self.latest_img)
                 self.get_logger().info(f'Snapshot saved → {SNAPSHOT_PATH}')
-            if self.front_min != float('inf'):
+            if self.cube_front_min != float('inf'):
                 self.cube_world_pos = (
-                    x + self.front_min * math.cos(yaw),
-                    y + self.front_min * math.sin(yaw))
+                    x + self.cube_front_min * math.cos(yaw),
+                    y + self.cube_front_min * math.sin(yaw))
                 self.get_logger().info(
                     f'[REPORT] Cube world pos ({self.cube_world_pos[0]:.3f}, '
                     f'{self.cube_world_pos[1]:.3f}) m')
@@ -743,31 +748,10 @@ class AStarNav(Node):
 
     def _begin_return(self):
         self.active_goal = (0.0, 0.0)
-        self.obstacle_grid[:] = 0
         self.path = []
         self.need_replan = True
         self.state = RETURNING
-        self._reseed_amcl()
         self.get_logger().info('RETURNING to origin (0, 0)')
-
-    def _reseed_amcl(self):
-        """Re-publish initialpose at current TF position to reset AMCL particle diversity."""
-        if not hasattr(self, 'initial_pose_pub'):
-            return
-        msg = PoseWithCovarianceStamped()
-        msg.header.frame_id = MAP_FRAME
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.pose.pose.position.x = self.current_x
-        msg.pose.pose.position.y = self.current_y
-        msg.pose.pose.orientation.z = math.sin(self.current_yaw / 2.0)
-        msg.pose.pose.orientation.w = math.cos(self.current_yaw / 2.0)
-        msg.pose.covariance[0]  = 0.10
-        msg.pose.covariance[7]  = 0.10
-        msg.pose.covariance[35] = 0.05
-        self.initial_pose_pub.publish(msg)
-        self.get_logger().info(
-            f'AMCL re-seeded at ({self.current_x:.2f},{self.current_y:.2f}) '
-            f'yaw={math.degrees(self.current_yaw):.1f}°')
 
     def log_mission_summary(self):
         elapsed = time.time() - self.start_time
@@ -785,6 +769,8 @@ class AStarNav(Node):
                 f'  Cube world pos : ({self.cube_world_pos[0]:.3f}, {self.cube_world_pos[1]:.3f}) m')
         else:
             self.get_logger().info('  Cube world pos : unknown')
+        
+        self.get_logger().info(f'  Final pose     : ({self.current_x:.3f}, {self.current_y:.3f}) m yaw={math.degrees(self.current_yaw):.1f}°')
         self.get_logger().info('=' * 55)
 
     # ── Debug visualisation ────────────────────────────────────────────────--
