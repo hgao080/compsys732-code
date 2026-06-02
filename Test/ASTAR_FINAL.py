@@ -66,7 +66,9 @@ GOAL_X, GOAL_Y  = 0.00568, -3.64    # ← read these off your map (metres, map f
 GOAL_TOLERANCE  = 0.15             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
-INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
+INFLATION_RADIUS      = 0.20  # metres — hard inflation (collision boundary)
+SOFT_INFLATION_RADIUS = 0.35  # metres — soft cost gradient beyond hard inflation
+SOFT_INFLATION_WEIGHT = 3.0   # max extra A* cost per cell at hard-inflation edge
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
 LIDAR_YAW_OFFSET   = math.radians(90.0)
@@ -183,7 +185,8 @@ class AStarNav(Node):
 
         # Dynamic obstacle layer (live LiDAR), same shape, Y-UP.
         self.obstacle_grid = np.zeros((self.H, self.W), dtype=np.float32)
-        self.blocked = self._build_blocked()         # latest inflated cost grid
+        self.cost_grid = np.zeros((self.H, self.W), dtype=np.float32)
+        self.blocked = self._build_blocked()         # also populates cost_grid
 
         # ── Pose state ──
         self.current_x = START_X
@@ -360,7 +363,17 @@ class AStarNav(Node):
         if not static_only:
             occ |= (self.obstacle_grid >= OBSTACLE_THRESH)
         inflated = cv2.dilate(occ.astype(np.uint8), self.kernel)
-        return inflated > 0
+        blocked = inflated > 0
+
+        # Distance (in cells) from each free cell to nearest hard-blocked cell.
+        # Cells within SOFT_INFLATION_RADIUS of a wall pay a penalty so A*
+        # prefers corridor centres over edges.
+        free_dist = cv2.distanceTransform((~blocked).astype(np.uint8), cv2.DIST_L2, 5)
+        soft_cells = SOFT_INFLATION_RADIUS / self.pres
+        self.cost_grid = np.maximum(
+            0.0, 1.0 - free_dist / soft_cells) * SOFT_INFLATION_WEIGHT
+
+        return blocked
 
     # ── A* planner (8-connected, octile heuristic, no corner cutting) ───────---
     def _nearest_free(self, row, col, max_r=20):
@@ -421,7 +434,7 @@ class AStarNav(Node):
                 if dr != 0 and dc != 0:
                     if blk[cr + dr, cc] or blk[cr, cc + dc]:
                         continue
-                ng = g + cost
+                ng = g + cost + self.cost_grid[nr, nc]
                 if ng < g_score.get((nr, nc), float('inf')):
                     g_score[(nr, nc)] = ng
                     came[(nr, nc)] = cur
