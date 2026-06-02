@@ -67,7 +67,7 @@ GOAL_TOLERANCE  = 0.15             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 INFLATION_RADIUS      = 0.20  # metres — hard inflation (collision boundary)
-SOFT_INFLATION_RADIUS = 0.35  # metres — soft cost gradient beyond hard inflation
+SOFT_INFLATION_RADIUS = 0.25  # metres — soft cost gradient beyond hard inflation
 SOFT_INFLATION_WEIGHT = 3.0   # max extra A* cost per cell at hard-inflation edge
 
 # ── LiDAR / Dynamic Obstacle Config ───────────────────────────────────────────
