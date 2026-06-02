@@ -93,6 +93,7 @@ WALL_LOST_TURN        = 0.7           # rad/s — turn speed when reacquiring ri
 WALL_TARGET_DIST      = 0.29          # metres — desired distance to right wall
 WALL_KP               = 1.2           # proportional gain for right-wall distance control
 WALL_LOST_GAP_TICKS   = 15            # ticks of continuous wall-loss before gap-crossing
+GAP_COMMIT_TICKS      = 30            # ticks to stay committed to crossing once started
 GAP_CROSS_SPEED       = 0.08          # m/s — forward speed while threading a gap
 GAP_CLEAR_ARC_DEG     = 8             # degrees either side of forward for gap check
 CUBE_RANGE_ARC_DEG    = 15             # degrees either side of forward for cube distance
@@ -203,6 +204,7 @@ class AStarNav(Node):
         self.right_min    = float('inf')
         self.have_scan    = False
         self.recovery_gap_ticks = 0
+        self.gap_committed = 0
 
         # ── Plan / control state ──
         self.path = []            # list of (wx, wy) world waypoints, start -> goal
@@ -673,9 +675,12 @@ class AStarNav(Node):
             if self.front_min < SAFE_STOP_DIST:
                 msg.linear.x  = 0.0
                 msg.angular.z = TURN_SPEED
-            elif self.right_min > WALL_LOST_THRESHOLD:
+            elif self.right_min > WALL_LOST_THRESHOLD or self.gap_committed > 0:
                 self.recovery_gap_ticks += 1
-                if self.recovery_gap_ticks > WALL_LOST_GAP_TICKS:
+                if self.recovery_gap_ticks > WALL_LOST_GAP_TICKS or self.gap_committed > 0:
+                    self.gap_committed = max(0, self.gap_committed - 1)
+                    if self.recovery_gap_ticks > WALL_LOST_GAP_TICKS:
+                        self.gap_committed = GAP_COMMIT_TICKS
                     if self.front_narrow < SAFE_STOP_DIST:
                         msg.linear.x  = 0.0
                         msg.angular.z = TURN_SPEED
@@ -687,6 +692,7 @@ class AStarNav(Node):
                     msg.angular.z = -WALL_LOST_TURN
             else:
                 self.recovery_gap_ticks = 0
+                self.gap_committed = 0
                 error = self.right_min - WALL_TARGET_DIST
                 msg.linear.x  = FORWARD_SPEED
                 msg.angular.z = -WALL_KP * error
