@@ -42,7 +42,7 @@ import tf2_ros
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 # ── Robot / Topic Config ──────────────────────────────────────────────────────
-NAMESPACE   = 'T21'                       # ← your robot namespace ('' for none)
+NAMESPACE   = 'T4'                       # ← your robot namespace ('' for none)
 CMD_VEL     = f'{NAMESPACE}/cmd_vel'
 SCAN_TOPIC  = f'{NAMESPACE}/scan'
 INITIALPOSE = f'{NAMESPACE}/initialpose'
@@ -62,8 +62,8 @@ INITIAL_POSE_DELAY_S = 2.0
 TF_ON_ROBOT_NAMESPACE = True
 
 # ── Goal ──────────────────────────────────────────────────────────────────────
-GOAL_X, GOAL_Y  = 0.58, -2.565    # ← read these off your map (metres, map frame)
-GOAL_TOLERANCE  = 0.1             # metres — close enough to count as arrived
+GOAL_X, GOAL_Y  = 0.00568, -3.64    # ← read these off your map (metres, map frame)
+GOAL_TOLERANCE  = 0.15             # metres — close enough to count as arrived
 
 # ── Footprint / Planning Config ───────────────────────────────────────────────
 INFLATION_RADIUS = 0.25       # metres — obstacles grown by this for planning
@@ -93,7 +93,7 @@ WALL_KP               = 1.2           # proportional gain for right-wall distanc
 WALL_LOST_GAP_TICKS   = 15            # ticks of continuous wall-loss before gap-crossing
 GAP_CROSS_SPEED       = 0.08          # m/s — forward speed while threading a gap
 GAP_CLEAR_ARC_DEG     = 8             # degrees either side of forward for gap check
-CUBE_RANGE_ARC_DEG    = 5             # degrees either side of forward for cube distance
+CUBE_RANGE_ARC_DEG    = 15             # degrees either side of forward for cube distance
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
 SHOW_VIS = True               # cv2 debug window (needs a display); set False if headless
@@ -105,12 +105,10 @@ RED_LOW1             = np.array([0,   95,  95])
 RED_HIGH1            = np.array([8,  255, 255])
 RED_LOW2             = np.array([177, 95,  95])
 RED_HIGH2            = np.array([180, 255, 255])
-MIN_PIXELS_CENTRE    = 7000
+MIN_PIXELS_CENTRE    = 8500
 CENTRE_TOLERANCE_PX  = 15
-CENTRE_SPIN_KP       = 0.15
-CENTRE_SPIN_MAX      = 0.2            # rad/s — hard cap on centering spin speed
-CENTRE_CONFIRM_TICKS = 8             # ticks stopped within tolerance before CAPTURE
-CENTRE_TIMEOUT_TICKS = 100
+CENTRE_SPIN_KP       = 0.3
+CENTRE_TIMEOUT_TICKS = 200
 CAPTURE_TICKS        = 50
 SCAN_SPIN_REVS       = 1.0
 ORIGIN_THRESHOLD     = 0.1
@@ -208,6 +206,7 @@ class AStarNav(Node):
         self.path_idx = 0
         self.need_replan = True
         self.active_goal = (GOAL_X, GOAL_Y)
+        self.nav_goal = (GOAL_X, GOAL_Y)  # nearest free-cell world pos, updated each replan
         self.state = WAIT_FOR_POSE
         self.start_time = time.time()
 
@@ -218,7 +217,6 @@ class AStarNav(Node):
         self.latest_img      = None
         self.red_pixels      = 0
         self.centre_ticks    = 0
-        self.centre_confirm  = 0
         self.capture_ticks   = 0
         self.spin_ticks      = 0
         self.cube_world_pos  = None
@@ -262,7 +260,7 @@ class AStarNav(Node):
         return 0 <= row < self.H and 0 <= col < self.W
 
     def dist_to_goal(self):
-        gx, gy = self.active_goal
+        gx, gy = self.nav_goal
         return math.hypot(gx - self.current_x, gy - self.current_y)
 
     # ── AMCL initial pose ────────────────────────────────────────────────────
@@ -504,6 +502,7 @@ class AStarNav(Node):
             return False
         self.path = path
         self.path_idx = 0
+        self.nav_goal = self.cell_to_world(*gfree)
         return True
 
     def path_is_blocked(self):
@@ -599,7 +598,6 @@ class AStarNav(Node):
                 and self.red_pixels >= MIN_PIXELS_CENTRE):
             self.cmd_pub.publish(Twist())
             self.centre_ticks = 0
-            self.centre_confirm = 0
             self.state = CENTRE_ON_CUBE
             self.get_logger().info(
                 f'Red cube detected ({self.red_pixels} px) → CENTRE_ON_CUBE')
@@ -719,31 +717,14 @@ class AStarNav(Node):
             return
         error = self.cube_cx - self.image_width / 2
         self.centre_ticks += 1
-
-        if self.centre_ticks >= CENTRE_TIMEOUT_TICKS:
+        if abs(error) <= CENTRE_TOLERANCE_PX or self.centre_ticks >= CENTRE_TIMEOUT_TICKS:
             self.capture_ticks = 0
-            self.centre_confirm = 0
             self.state = CAPTURE
-            self.get_logger().info(f'Cube centre timeout → CAPTURE (error={error:.0f}px)')
+            reason = 'timeout' if self.centre_ticks >= CENTRE_TIMEOUT_TICKS else f'{error:.0f}px'
+            self.get_logger().info(f'Cube centred ({reason}) → CAPTURE')
             return
-
-        if abs(error) <= CENTRE_TOLERANCE_PX:
-            self.cmd_pub.publish(Twist())   # stop while confirming
-            self.centre_confirm += 1
-            self.get_logger().info(
-                f'Centring confirm {self.centre_confirm}/{CENTRE_CONFIRM_TICKS} error={error:.0f}px')
-            if self.centre_confirm >= CENTRE_CONFIRM_TICKS:
-                self.capture_ticks = 0
-                self.centre_confirm = 0
-                self.state = CAPTURE
-                self.get_logger().info('Cube centred + confirmed → CAPTURE')
-            return
-
-        # Outside tolerance — reset confirm and keep spinning
-        self.centre_confirm = 0
         msg = Twist()
-        raw = -CENTRE_SPIN_KP * (error / (self.image_width / 2))
-        msg.angular.z = max(-CENTRE_SPIN_MAX, min(CENTRE_SPIN_MAX, raw))
+        msg.angular.z = -CENTRE_SPIN_KP * (error / (self.image_width / 2))
         self.cmd_pub.publish(msg)
 
     def do_capture(self):
@@ -758,7 +739,7 @@ class AStarNav(Node):
                 cv2.imwrite(SNAPSHOT_PATH, self.latest_img)
                 self.get_logger().info(f'Snapshot saved → {SNAPSHOT_PATH}')
             if self.cube_front_min != float('inf'):
-                d = self.cube_front_min + 0.06
+                d = self.cube_front_min
                 self.cube_world_pos = (
                     x + d * math.cos(yaw),
                     y + d * math.sin(yaw))
@@ -770,6 +751,7 @@ class AStarNav(Node):
 
     def _begin_return(self):
         self.active_goal = (0.0, 0.0)
+        self.nav_goal = (0.0, 0.0)
         self.path = []
         self.need_replan = True
         self.state = RETURNING
